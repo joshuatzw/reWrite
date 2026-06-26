@@ -1,57 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-// ── Types ──────────────────────────────────────────────────────────────────────
-
-type ActiveView = "home" | "history" | "skills" | "settings";
-
-interface Skill {
-  id: string;
-  name: string;
-  instructions: string;
-  enabled: boolean;
-  order: number;
-  base_skill_id?: string | null;
-}
-
-interface SkillsConfig {
-  global_instructions: string;
-  skills: Skill[];
-  builtin_enabled: Record<string, boolean>;
-}
-
-interface Config {
-  hotkey: string;
-  super_hotkey: string;
-  default_skill_id: string;
-  model: string;
-  restore_clipboard: boolean;
-  restore_delay_ms: number;
-  paste_delay_ms: number;
-}
-
-interface HistoryEntry {
-  id: string;
-  timestamp_ms: number;
-  skill_id: string;
-  skill_name: string;
-  input_text: string;
-  output_text: string;
-  output_word_count: number;
-}
+import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
+import { BUILTIN_SKILLS } from "../skills";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const ACCENT = "#16161a";
 
-const BUILTIN_SKILLS_DEF = [
-  { id: "__proofread__",   name: "Proofread",    desc: "Fix spelling and grammar while preserving your tone and voice." },
-  { id: "__formal_email__", name: "Formal Email", desc: "Rewrite as a polished, professional business email." },
-  { id: "__summarise__",   name: "Summarise",    desc: "Condense text into concise bullet points." },
-  { id: "__shorten__",     name: "Shorten",      desc: "Shorten the text while preserving its full meaning." },
-];
-
-const BUILTIN_SKILL_OPTIONS = BUILTIN_SKILLS_DEF.map((b) => ({ id: b.id, name: b.name }));
+const BUILTIN_SKILL_OPTIONS = BUILTIN_SKILLS.map((b) => ({ id: b.id, name: b.name }));
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -201,6 +157,8 @@ const IconGear = () => (
 );
 
 // ── NavButton ──────────────────────────────────────────────────────────────────
+
+type ActiveView = "home" | "history" | "skills" | "settings";
 
 function NavButton({ label, icon, active, onClick }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void }) {
   const [hov, setHov] = useState(false);
@@ -407,10 +365,7 @@ function HistoryView({ history }: { history: HistoryEntry[] }) {
   const skillIds = new Set(history.map((e) => e.skill_id));
   const chips: { k: string; label: string }[] = [
     { k: "all", label: "All" },
-    ...(skillIds.has("__proofread__")   ? [{ k: "__proofread__",   label: "Proofread" }]    : []),
-    ...(skillIds.has("__formal_email__") ? [{ k: "__formal_email__", label: "Formal Email" }] : []),
-    ...(skillIds.has("__summarise__")   ? [{ k: "__summarise__",   label: "Summarise" }]    : []),
-    ...(skillIds.has("__shorten__")     ? [{ k: "__shorten__",     label: "Shorten" }]      : []),
+    ...BUILTIN_SKILLS.filter((b) => skillIds.has(b.id)).map((b) => ({ k: b.id, label: b.name })),
     ...[...skillIds].some((id) => !id.startsWith("__")) ? [{ k: "custom", label: "Custom" }] : [],
   ];
 
@@ -485,7 +440,7 @@ function HistoryView({ history }: { history: HistoryEntry[] }) {
 
 // ── Skills View ────────────────────────────────────────────────────────────────
 
-function BuiltinSkillCard({ name, desc, enabled, onToggle }: { id?: string; name: string; desc: string; enabled: boolean; onToggle: () => void }) {
+function BuiltinSkillCard({ name, desc, enabled, onToggle }: { name: string; desc: string; enabled: boolean; onToggle: () => void }) {
   return (
     <div style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 15, padding: "24px 24px 22px", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 14 }}>
@@ -720,12 +675,11 @@ function SkillsView() {
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: 1.1, textTransform: "uppercase", color: "#a7aab0", marginBottom: 14 }}>Built-in</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-          {BUILTIN_SKILLS_DEF.map((b) => (
+          {BUILTIN_SKILLS.map((b) => (
             <BuiltinSkillCard
               key={b.id}
-              id={b.id}
               name={b.name}
-              desc={b.desc}
+              desc={b.description}
               enabled={isBuiltinEnabled(b.id)}
               onToggle={() => handleToggleBuiltin(b.id)}
             />
@@ -831,7 +785,9 @@ function SettingsView() {
     setDefaultSkillId(skillId);
     try {
       await invoke("set_default_skill", { skillId });
-    } catch (_) {}
+    } catch (err) {
+      console.error("Failed to save default skill:", err);
+    }
   }
 
   const divider = <div style={{ height: 1, background: "#f0f1f3", margin: "0 -24px" }} />;

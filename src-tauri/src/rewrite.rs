@@ -34,7 +34,6 @@ pub async fn call_api_raw(
     let response = client
         .post(EDGE_FUNCTION_URL)
         .header("Authorization", format!("Bearer {SUPABASE_ANON_KEY}"))
-        .header("content-type", "application/json")
         .json(&body)
         .send()
         .await?;

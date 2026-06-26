@@ -117,17 +117,17 @@ fn on_super_hotkey(app: &AppHandle) {
         };
 
         // Store captured text
-        { *state.captured_text.lock().unwrap() = Some(text.clone()); }
-        { *state.original_clipboard.lock().unwrap() = Some(original.clone()); }
+        if let Ok(mut g) = state.captured_text.lock() { *g = Some(text.clone()); }
+        if let Ok(mut g) = state.original_clipboard.lock() { *g = Some(original.clone()); }
 
         // Extract config data before awaiting
         let (model, default_skill_id, paste_delay_ms, restore, restore_delay_ms) = {
-            let cfg = state.config.lock().unwrap().clone();
-            (cfg.model, cfg.default_skill_id, cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
+            let Ok(cfg) = state.config.lock() else { return };
+            (cfg.model.clone(), cfg.default_skill_id.clone(), cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
         };
 
         let (system, skill_name) = {
-            let sc = state.skills_config.lock().unwrap();
+            let Ok(sc) = state.skills_config.lock() else { return };
             let system = skills::build_system_prompt(&sc, Some(&default_skill_id));
             let name = skills::skill_display_name(&sc, &default_skill_id);
             (system, name)
@@ -184,7 +184,9 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed { return; }
 
                     let Some(state) = app.try_state::<AppState>() else { return };
-                    let super_hk = state.config.lock().unwrap().super_hotkey.clone();
+                    let Ok(cfg) = state.config.lock() else { return };
+                    let super_hk = cfg.super_hotkey.clone();
+                    drop(cfg);
 
                     let is_super = super_hk
                         .parse::<tauri_plugin_global_shortcut::Shortcut>()
@@ -230,10 +232,30 @@ pub fn run() {
 
             // Register super hotkey only if different from main hotkey
             if super_hotkey != hotkey {
-                if !app.global_shortcut().register(super_hotkey.as_str()).is_ok() {
+                if app.global_shortcut().register(super_hotkey.as_str()).is_err() {
                     eprintln!("Failed to register super hotkey '{super_hotkey}'");
                 }
             }
+
+            // Pre-warm the overlay window hidden so the first hotkey activation is instant.
+            // WebView2 loads in the background; by the time the user presses the hotkey the
+            // webview is already painted, eliminating the initial-load delay and the ghost
+            // transparent-border window that appears when creating a visible window cold.
+            let _ = tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "overlay",
+                tauri::WebviewUrl::App("".into()),
+            )
+            .title("")
+            .decorations(false)
+            .always_on_top(true)
+            .transparent(true)
+            .skip_taskbar(true)
+            .inner_size(480.0, 430.0)
+            .center()
+            .focused(false)
+            .visible(false)
+            .build();
 
             let settings_item = MenuItemBuilder::new("Settings").id("settings").build(app)?;
             let quit_item = MenuItemBuilder::new("Quit ReWrite").id("quit").build(app)?;

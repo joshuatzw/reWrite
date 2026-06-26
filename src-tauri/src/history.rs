@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, path::PathBuf,
+    fs, path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,17 +33,17 @@ pub fn count_words(text: &str) -> u32 {
     text.split_whitespace().count() as u32
 }
 
-pub fn load(path: &PathBuf) -> HistoryStore {
+pub fn load(path: &Path) -> HistoryStore {
     fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(store: &HistoryStore, path: &PathBuf) -> Result<()> {
+pub fn save(store: &HistoryStore, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_string(store)?)?;
+    fs::write(path, serde_json::to_string_pretty(store)?)?;
     Ok(())
 }

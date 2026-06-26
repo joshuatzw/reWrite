@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -36,14 +36,14 @@ pub fn new_id() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
-pub fn load(path: &PathBuf) -> SkillsConfig {
+pub fn load(path: &Path) -> SkillsConfig {
     fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(config: &SkillsConfig, path: &PathBuf) -> Result<()> {
+pub fn save(config: &SkillsConfig, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

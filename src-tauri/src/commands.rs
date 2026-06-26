@@ -84,13 +84,13 @@ pub async fn rewrite_with_skill(
         .clone()
         .ok_or("No text captured. Highlight some text and try again.")?;
 
-    let model = lock(&state.config)?.model.clone();
+    let (model, effective_skill_id) = {
+        let cfg = lock(&state.config)?;
+        let effective = skill_id.unwrap_or_else(|| cfg.default_skill_id.clone());
+        (cfg.model.clone(), effective)
+    };
     let skills_config = lock(&state.skills_config)?.clone();
     let client = state.http_client.clone();
-
-    let effective_skill_id = skill_id
-        .clone()
-        .unwrap_or_else(|| lock(&state.config).map(|c| c.default_skill_id.clone()).unwrap_or_default());
 
     let system = crate::skills::build_system_prompt(&skills_config, Some(&effective_skill_id));
     let user_message = format!("<text>\n{text}\n</text>");
