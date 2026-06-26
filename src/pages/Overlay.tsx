@@ -1,23 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { SkillsConfig } from "../types";
+import { BUILTIN_SKILLS } from "../skills";
 
 type Status = "idle" | "loading" | "error";
-
-interface Skill {
-  id: string;
-  name: string;
-  instructions: string;
-  enabled: boolean;
-  order: number;
-  base_skill_id?: string | null;
-}
-
-interface SkillsConfig {
-  global_instructions: string;
-  skills: Skill[];
-  builtin_enabled: Record<string, boolean>;
-}
 
 interface SkillItem {
   id: string;
@@ -25,51 +12,50 @@ interface SkillItem {
   description: string;
 }
 
-const BUILTIN_ITEMS: SkillItem[] = [
-  { id: "__proofread__", name: "Proofread", description: "Fix spelling and grammar while preserving your tone and voice." },
-  { id: "__formal_email__", name: "Formal Email", description: "Rewrite as a polished, professional business email." },
-  { id: "__summarise__", name: "Summarise (Meeting Notes)", description: "Summarise as concise meeting notes with key points and action items." },
-  { id: "__shorten__", name: "Shorten", description: "Shorten the text while preserving its full meaning." },
-];
+function buildItems(cfg: SkillsConfig): SkillItem[] {
+  const builtins = BUILTIN_SKILLS.filter((b) => cfg.builtin_enabled?.[b.id] !== false);
+
+  const enabled = [...cfg.skills]
+    .filter((s) => s.enabled)
+    .sort((a, b) => a.order - b.order);
+
+  const customItems = enabled.map((s) => {
+    let description = s.instructions.trim();
+    if (!description) {
+      if (s.base_skill_id) {
+        const baseName =
+          BUILTIN_SKILLS.find((b) => b.id === s.base_skill_id)?.name ??
+          enabled.find((b) => b.id === s.base_skill_id)?.name;
+        description = baseName ? `Based on ${baseName}` : "No additional instructions.";
+      } else {
+        description = "No additional instructions.";
+      }
+    }
+    return { id: s.id, name: s.name, description };
+  });
+
+  return [...builtins, ...customItems];
+}
+
+const EMPTY_SKILL_ITEMS = buildItems({ global_instructions: "", skills: [], builtin_enabled: {} });
 
 export default function Overlay() {
   const [status, _setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [capturedText, setCapturedText] = useState<string | null>(null);
-  const [items, setItems] = useState<SkillItem[]>(BUILTIN_ITEMS);
+  const [items, setItems] = useState<SkillItem[]>(EMPTY_SKILL_ITEMS);
   const [focusedIndex, setFocusedIndex] = useState(0);
 
   const statusRef = useRef<Status>("idle");
-  const itemsRef = useRef<SkillItem[]>(BUILTIN_ITEMS);
+  const itemsRef = useRef<SkillItem[]>(EMPTY_SKILL_ITEMS);
+  const cancelledRef = useRef(false);
 
   const setStatus = useCallback((s: Status) => {
     statusRef.current = s;
     _setStatus(s);
   }, []);
 
-  function buildItems(cfg: SkillsConfig): SkillItem[] {
-    const builtins = BUILTIN_ITEMS.filter((b) => cfg.builtin_enabled?.[b.id] !== false);
-
-    const enabled = [...cfg.skills]
-      .filter((s) => s.enabled)
-      .sort((a, b) => a.order - b.order);
-    const customItems = enabled.map((s) => {
-      let description = s.instructions.trim();
-      if (!description) {
-        if (s.base_skill_id) {
-          const baseName = BUILTIN_ITEMS.find((b) => b.id === s.base_skill_id)?.name
-            ?? enabled.find((b) => b.id === s.base_skill_id)?.name;
-          description = baseName ? `Based on ${baseName}` : "No additional instructions.";
-        } else {
-          description = "No additional instructions.";
-        }
-      }
-      return { id: s.id, name: s.name, description };
-    });
-    return [...builtins, ...customItems];
-  }
-
-  async function refreshData() {
+  const refreshData = useCallback(async () => {
     const [text, cfg] = await Promise.all([
       invoke<string | null>("get_captured_text"),
       invoke<SkillsConfig>("get_skills_config"),
@@ -78,7 +64,7 @@ export default function Overlay() {
     const list = buildItems(cfg);
     setItems(list);
     itemsRef.current = list;
-  }
+  }, []);
 
   useEffect(() => {
     refreshData();
@@ -97,17 +83,18 @@ export default function Overlay() {
       });
 
     return () => unlisten?.();
-  }, [setStatus]);
+  }, [refreshData, setStatus]);
 
-  // Keyboard navigation
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (statusRef.current === "loading") return;
-
       if (e.key === "Escape") {
+        cancelledRef.current = true;
+        setStatus("idle");
         getCurrentWindow().hide();
         return;
       }
+
+      if (statusRef.current === "loading") return;
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -129,13 +116,16 @@ export default function Overlay() {
   }, []);
 
   async function handleSelect(skillId: string) {
+    cancelledRef.current = false;
     setStatus("loading");
     setError(null);
     try {
       const result = await invoke<string>("rewrite_with_skill", { skillId });
+      if (cancelledRef.current) return;
       await invoke("paste_text", { result });
       setStatus("idle");
     } catch (err) {
+      if (cancelledRef.current) return;
       setStatus("error");
       setError(String(err));
       getCurrentWindow().show();
@@ -149,31 +139,42 @@ export default function Overlay() {
     : null;
 
   return (
-    <div className="flex items-center justify-center w-screen h-screen bg-transparent">
-      <div
-        className="w-[480px] rounded-2xl border border-white/10 bg-[#0F1117] shadow-[0_0_40px_rgba(0,0,0,0.8)] p-5 select-none"
-        style={{ fontFamily: "-apple-system, 'Segoe UI', sans-serif" }}
-      >
+    <div style={{ width: "100vw", height: "100vh", background: "transparent", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
+      <div style={{
+        width: "100%", height: "100%", borderRadius: 18,
+        border: "1px solid #e0e1e4",
+        background: "#fff",
+        boxShadow: "0 8px 40px rgba(20,20,26,.16), 0 2px 8px rgba(20,20,26,.08)",
+        padding: "20px 20px 16px",
+        display: "flex", flexDirection: "column",
+        userSelect: "none",
+      }}>
         {/* Header */}
-        <div className="mb-4">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-white/60 text-sm">✦</span>
-            <span className="text-white font-medium text-sm">How should this be rewritten?</span>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <span style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 15, color: "#16161a", letterSpacing: -.2 }}>
+              How should this be rewritten?
+            </span>
           </div>
           {preview && (
-            <p className="text-white/35 text-xs pl-5 truncate">"{preview}"</p>
+            <p style={{ fontSize: 12, color: "#a7aab0", paddingLeft: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              "{preview}"
+            </p>
           )}
           {!capturedText && status === "idle" && (
-            <p className="text-amber-400/80 text-xs pl-5">
+            <p style={{ fontSize: 12, color: "#c0392b", paddingLeft: 0 }}>
               No text captured — highlight some text first.
             </p>
           )}
         </div>
 
+        {/* Divider */}
+        <div style={{ height: 1, background: "#f0f1f3", margin: "0 -20px 12px" }} />
+
         {/* Skills list */}
         {status !== "loading" && (
           <>
-            <div className="space-y-1 max-h-[300px] overflow-y-auto mb-3">
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
               {items.map((item, i) => {
                 const focused = focusedIndex === i;
                 return (
@@ -181,22 +182,35 @@ export default function Overlay() {
                     key={item.id}
                     onClick={() => handleSelect(item.id)}
                     onMouseEnter={() => setFocusedIndex(i)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg border transition-all duration-100 ${
-                      focused
-                        ? "bg-white/12 border-white/20 text-white"
-                        : "bg-white/4 border-white/8 text-white/70 hover:bg-white/8 hover:text-white/90"
-                    }`}
+                    style={{
+                      width: "100%", textAlign: "left",
+                      padding: "9px 12px",
+                      borderRadius: 10,
+                      border: `1px solid ${focused ? "#16161a" : "#e8e9ec"}`,
+                      background: focused ? "#16161a" : "#fff",
+                      cursor: "pointer",
+                      transition: "background .1s, border-color .1s",
+                    }}
                   >
-                    <div className="flex items-center gap-2">
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                       {focused && (
-                        <span className="text-white/50 text-xs leading-none">›</span>
+                        <span style={{ color: "#fff", fontSize: 12, lineHeight: 1, flexShrink: 0 }}>›</span>
                       )}
-                      <span className={`text-sm font-medium ${!focused && "pl-4"}`}>
+                      <span style={{
+                        fontSize: 13.5, fontWeight: 600,
+                        color: focused ? "#fff" : "#1f2026",
+                        paddingLeft: focused ? 0 : 19,
+                      }}>
                         {item.name}
                       </span>
                     </div>
                     {focused && item.description && (
-                      <p className="text-white/40 text-xs mt-1 pl-4 leading-relaxed line-clamp-2">
+                      <p style={{
+                        fontSize: 11.5, color: "rgba(255,255,255,.55)",
+                        marginTop: 3, paddingLeft: 19,
+                        lineHeight: 1.45,
+                        display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                      }}>
                         {item.description}
                       </p>
                     )}
@@ -206,10 +220,10 @@ export default function Overlay() {
             </div>
 
             {status === "error" && error && (
-              <p className="text-red-400/90 text-xs mb-3 px-1">{error}</p>
+              <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8 }}>{error}</p>
             )}
 
-            <p className="text-white/20 text-xs text-center">
+            <p style={{ fontSize: 11, color: "#c4c6cb", textAlign: "center", letterSpacing: .2 }}>
               ↑↓ navigate · Enter select · Esc dismiss
             </p>
           </>
@@ -217,17 +231,21 @@ export default function Overlay() {
 
         {/* Loading state */}
         {status === "loading" && (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="flex gap-1">
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
+            <div style={{ display: "flex", gap: 5 }}>
               {[0, 1, 2].map((i) => (
                 <div
                   key={i}
-                  className="w-1.5 h-1.5 rounded-full bg-white/50 animate-bounce"
-                  style={{ animationDelay: `${i * 150}ms` }}
+                  style={{
+                    width: 6, height: 6, borderRadius: "50%",
+                    background: "#16161a",
+                    animation: "bounce 1s infinite",
+                    animationDelay: `${i * 150}ms`,
+                  }}
                 />
               ))}
             </div>
-            <p className="text-white/40 text-xs">Rewriting…</p>
+            <p style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3" }}>Rewriting…</p>
           </div>
         )}
       </div>

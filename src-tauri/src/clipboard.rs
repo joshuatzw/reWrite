@@ -4,13 +4,20 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
-/// Simulate Ctrl+C to copy the current selection.
+// macOS uses Cmd (Meta) for copy/paste; Windows/Linux use Ctrl.
+fn copy_paste_mod() -> Key {
+    if cfg!(target_os = "macos") { Key::Meta } else { Key::Control }
+}
+
+/// Simulate Cmd/Ctrl+C to copy the current selection.
 /// Returns (selected_text, previous_clipboard_contents).
 pub fn capture_selection() -> Result<(String, String)> {
-    // Release Ctrl+Shift so the source app doesn't see Ctrl+Shift+C.
+    // Release the hotkey modifiers so the source app doesn't see them bleed into the copy.
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(Key::Shift, Direction::Release)?;
     enigo.key(Key::Control, Direction::Release)?;
+    #[cfg(target_os = "macos")]
+    enigo.key(Key::Meta, Direction::Release)?;
     drop(enigo);
 
     thread::sleep(Duration::from_millis(100));
@@ -23,11 +30,12 @@ pub fn capture_selection() -> Result<(String, String)> {
         text
     };
 
-    // Simulate Ctrl+C.
+    // Simulate Cmd+C (Mac) or Ctrl+C (Windows/Linux).
+    let modifier = copy_paste_mod();
     let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Control, Direction::Press)?;
+    enigo.key(modifier, Direction::Press)?;
     enigo.key(Key::Unicode('c'), Direction::Click)?;
-    enigo.key(Key::Control, Direction::Release)?;
+    enigo.key(modifier, Direction::Release)?;
     drop(enigo);
 
     // Wait for the source app to fill the clipboard.
@@ -48,10 +56,11 @@ pub fn paste_and_restore(
 
     thread::sleep(Duration::from_millis(50));
 
+    let modifier = copy_paste_mod();
     let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Control, Direction::Press)?;
+    enigo.key(modifier, Direction::Press)?;
     enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(Key::Control, Direction::Release)?;
+    enigo.key(modifier, Direction::Release)?;
     drop(enigo);
 
     if restore && !original.is_empty() {

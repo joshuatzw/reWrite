@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 fn default_hotkey() -> String { "ctrl+shift+r".to_string() }
 fn default_super_hotkey() -> String { "ctrl+shift+period".to_string() }
@@ -43,7 +43,7 @@ impl Default for Config {
     }
 }
 
-pub fn load(path: &PathBuf) -> Config {
+pub fn load(path: &Path) -> Config {
     let mut config: Config = fs::read_to_string(path)
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
@@ -59,7 +59,7 @@ pub fn load(path: &PathBuf) -> Config {
     config
 }
 
-pub fn save(config: &Config, path: &PathBuf) -> Result<()> {
+pub fn save(config: &Config, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
