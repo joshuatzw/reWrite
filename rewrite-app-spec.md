@@ -1,4 +1,4 @@
-# ReWrite — Product Specification
+# reWrite — Product Specification
 **System-wide AI Text Transformer for Windows**
 Version 0.1 — Draft
 Josh / Personal Build
@@ -7,7 +7,7 @@ Josh / Personal Build
 
 ## 1. Overview
 
-ReWrite is a system-wide hotkey-triggered AI text transformer for Windows, built with Tauri 2 + Rust. It lives in the system tray, has zero UI chrome until you need it, and does exactly one thing: takes highlighted text from any application and rewrites it in a format you choose — without making you leave your current window.
+reWrite is a system-wide hotkey-triggered AI text transformer for Windows, built with Tauri 2 + Rust. It lives in the system tray, has zero UI chrome until you need it, and does exactly one thing: takes highlighted text from any application and rewrites it in a format you choose — without making you leave your current window.
 
 It is the "Apple Intelligence Writing Tools" experience, built for Windows, productised as a SaaS.
 
@@ -23,7 +23,7 @@ Windows knowledge workers rewrite text dozens of times a day — switching a dra
 4. Copy the result back
 5. Paste it into the original app
 
-This is 5 steps and a full context switch. ReWrite does it in 2: **highlight → hotkey → pick a format → done.**
+This is 5 steps and a full context switch. reWrite does it in 2: **highlight → hotkey → pick a format → done.**
 
 ---
 
@@ -172,7 +172,7 @@ async fn rewrite_text(text: &str, format: RewriteFormat) -> Result<String> {
 
 ### 7.4 Config & State
 
-User config stored at `%APPDATA%\ReWrite\config.toml`:
+User config stored at `%APPDATA%\reWrite\config.toml`:
 
 ```toml
 [general]
@@ -210,7 +210,7 @@ auto_close_overlay_after_rewrite = true
 - Onboarding flow for first-run API key entry
 
 ### Phase 3 — SaaS & Monetisation
-- Replace user-supplied API key with hosted backend (ReWrite API key, usage metered)
+- Replace user-supplied API key with hosted backend (reWrite API key, usage metered)
 - Free tier: 30 rewrites/month
 - Pro tier: unlimited rewrites, custom presets, priority processing — ~$8–10/month
 - Team tier: shared brand voice presets, admin dashboard, SSO
@@ -225,7 +225,7 @@ auto_close_overlay_after_rewrite = true
 
 ## 9. Competitive Differentiators
 
-| Feature | ReWrite | Wispr Flow | Grammarly | Wordtune |
+| Feature | reWrite | Wispr Flow | Grammarly | Wordtune |
 |---|---|---|---|---|
 | Works in any Windows app | ✅ | ✅ | ❌ (browser/extension) | ❌ (browser/extension) |
 | Format picker UI | ✅ | ❌ (voice command) | ❌ | ❌ |
@@ -235,7 +235,7 @@ auto_close_overlay_after_rewrite = true
 | Command-palette UX | ✅ | ❌ | ❌ | ❌ |
 | Windows-native | ✅ | Partial (March '25) | ❌ | ❌ |
 
-**Core USP:** The format chooser overlay. Every competitor either auto-rewrites silently, or makes you leave your app. ReWrite gives you a fast, keyboard-driven choice of *how* — without breaking your flow.
+**Core USP:** The format chooser overlay. Every competitor either auto-rewrites silently, or makes you leave your app. reWrite gives you a fast, keyboard-driven choice of *how* — without breaking your flow.
 
 ---
 
@@ -270,7 +270,7 @@ auto_close_overlay_after_rewrite = true
 
 ## 12. Name & Positioning
 
-Working name: **ReWrite** (or stylised **re:write**)
+Working name: **reWrite**
 
 Tagline candidates:
 - *"Say it better. Instantly."*

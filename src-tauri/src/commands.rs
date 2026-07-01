@@ -84,6 +84,11 @@ pub async fn rewrite_with_skill(
         .clone()
         .ok_or("No text captured. Highlight some text and try again.")?;
 
+    let access_token = lock(&state.auth_session)?
+        .as_ref()
+        .map(|s| s.access_token.clone())
+        .ok_or("not_logged_in")?;
+
     let (model, effective_skill_id) = {
         let cfg = lock(&state.config)?;
         let effective = skill_id.unwrap_or_else(|| cfg.default_skill_id.clone());
@@ -95,7 +100,7 @@ pub async fn rewrite_with_skill(
     let system = crate::skills::build_system_prompt(&skills_config, Some(&effective_skill_id));
     let user_message = format!("<text>\n{text}\n</text>");
 
-    let output = crate::rewrite::call_api_raw(&client, &system, &user_message, &model)
+    let output = crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -332,4 +337,102 @@ pub fn get_history(state: State<AppState>) -> Vec<crate::history::HistoryEntry> 
     let mut entries = state.history.lock().unwrap().entries.clone();
     entries.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
     entries
+}
+
+// ── Auth / billing commands ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct AuthState {
+    pub logged_in: bool,
+    pub email: String,
+    pub is_subscribed: bool,
+    pub subscription_valid_until: Option<String>,
+    pub rewrite_count: u32,
+}
+
+#[tauri::command]
+pub fn get_auth_state(state: State<AppState>) -> AuthState {
+    let session = state.auth_session.lock().unwrap();
+    let sub = state.subscription.lock().unwrap();
+    AuthState {
+        logged_in: session.is_some(),
+        email: session.as_ref().map(|s| s.email.clone()).unwrap_or_default(),
+        is_subscribed: sub.is_subscribed,
+        subscription_valid_until: sub.subscription_valid_until.clone(),
+        rewrite_count: sub.rewrite_count,
+    }
+}
+
+#[tauri::command]
+pub async fn send_magic_link(
+    email: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::auth::send_magic_link(&state.http_client, &email)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
+        crate::auth::clear_session(&path);
+    }
+    *state.auth_session.lock().unwrap() = None;
+    *state.subscription.lock().unwrap() = crate::auth::SubscriptionCache::default();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_checkout(
+    plan: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let access_token = lock(&state.auth_session)?
+        .as_ref()
+        .map(|s| s.access_token.clone())
+        .ok_or("Not logged in")?;
+
+    let url = crate::auth::create_checkout_url(&state.http_client, &access_token, &plan)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_billing_portal(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let access_token = lock(&state.auth_session)?
+        .as_ref()
+        .map(|s| s.access_token.clone())
+        .ok_or("Not logged in")?;
+
+    let url = crate::auth::create_portal_url(&state.http_client, &access_token)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_subscription(state: State<'_, AppState>) -> Result<(), String> {
+    let access_token = lock(&state.auth_session)?
+        .as_ref()
+        .map(|s| s.access_token.clone())
+        .ok_or("Not logged in")?;
+
+    let sub = crate::auth::sync_subscription(&state.http_client, &access_token)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    *state.subscription.lock().unwrap() = sub;
+    Ok(())
 }

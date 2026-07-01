@@ -1,7 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
+
+interface AuthState {
+  logged_in: boolean;
+  email: string;
+  is_subscribed: boolean;
+  subscription_valid_until: string | null;
+  rewrite_count: number;
+}
 import { BUILTIN_SKILLS } from "../skills";
+import logoBlack from "../assets/rewrite_logo_black.png";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +46,23 @@ function formatTime(ms: number): string {
 function truncate(text: string, max: number): string {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max ? clean.slice(0, max).trimEnd() + "…" : clean;
+}
+
+function firstNameFromEmail(email: string): string {
+  const local = email.split("@")[0];
+  const part = local.split(/[._]/)[0];
+  return part.charAt(0).toUpperCase() + part.slice(1);
+}
+
+function initialsFromEmail(email: string): string {
+  const parts = email.split("@")[0].split(/[._]/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
+function formatRenewalDate(isoStr: string | null): string {
+  if (!isoStr) return "";
+  return new Date(isoStr).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
 interface DayStats { streakDays: number; weekDots: boolean[] }
@@ -156,6 +183,85 @@ const IconGear = () => (
   </svg>
 );
 
+// ── Login view ────────────────────────────────────────────────────────────────
+
+function LoginView({ onLogin }: { onLogin: () => void }) {
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await invoke("send_magic_link", { email: trimmed });
+      setSent(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Listen for auth:complete while this view is shown
+  useEffect(() => {
+    const unlisten = listen("auth:complete", () => onLogin());
+    return () => { unlisten.then((fn) => fn()); };
+  }, [onLogin]);
+
+  return (
+    <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center", background: "#e6e7ea", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
+      <div style={{ background: "#fff", borderRadius: 20, padding: "48px 44px", width: 400, boxShadow: "0 8px 40px rgba(20,20,26,.10)" }}>
+        <div style={{ textAlign: "center", marginBottom: 36 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 24 }}>
+            <img src={logoBlack} alt="reWrite" style={{ height: 52, width: "auto" }} />
+          </div>
+          <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 26, fontWeight: 700, color: "#16161a", marginBottom: 8 }}>Welcome to reWrite</h2>
+          <p style={{ fontSize: 14.5, color: "#74777e" }}>Enter your email to sign in or create an account.</p>
+        </div>
+
+        {sent ? (
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#16161a", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px" }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
+            </div>
+            <div style={{ fontSize: 17, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>Check your email</div>
+            <div style={{ fontSize: 14, color: "#74777e", lineHeight: 1.5 }}>
+              We sent a magic link to <strong>{email}</strong>.<br />Click it to sign in — this window will update automatically.
+            </div>
+            <button onClick={() => { setSent(false); setEmail(""); }} style={{ marginTop: 22, fontSize: 13.5, color: "#86898f", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              Use a different email
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="your@email.com"
+              autoFocus
+              style={{ border: "1px solid #e0e1e4", borderRadius: 10, padding: "13px 15px", fontSize: 15, color: "#16161a", outline: "none", fontFamily: "inherit" }}
+            />
+            {error && <div style={{ fontSize: 12.5, color: "#c0392b" }}>{error}</div>}
+            <button
+              type="submit"
+              disabled={!email.trim() || loading}
+              style={{ background: email.trim() ? "#16161a" : "#9a9da3", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 600, cursor: email.trim() ? "pointer" : "not-allowed", fontFamily: "inherit", transition: "background .15s" }}
+            >
+              {loading ? "Sending…" : "Send magic link"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── NavButton ──────────────────────────────────────────────────────────────────
 
 type ActiveView = "home" | "history" | "skills" | "settings";
@@ -185,13 +291,11 @@ function NavButton({ label, icon, active, onClick }: { label: string; icon: Reac
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
-function Sidebar({ active, setActive }: { active: ActiveView; setActive: (v: ActiveView) => void }) {
+function Sidebar({ active, setActive, authState }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState }) {
   return (
     <aside style={{ width: 250, minWidth: 250, background: "#e6e7ea", borderRight: "1px solid #dcdde1", display: "flex", flexDirection: "column", padding: "30px 20px 22px" }}>
-      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "center", padding: "6px 4px 30px" }}>
-        <span style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 58, lineHeight: .8, color: "#16161a" }}>r</span>
-        <span style={{ width: 1.5, height: 46, background: "#16161a", margin: "0 16px 8px", display: "inline-block" }} />
-        <span style={{ fontFamily: "'Pinyon Script', cursive", fontSize: 66, lineHeight: .8, color: "#16161a", marginBottom: -4 }}>w</span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 4px 30px" }}>
+        <img src={logoBlack} alt="reWrite" style={{ height: 58, width: "auto" }} />
       </div>
       <nav style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
@@ -201,13 +305,15 @@ function Sidebar({ active, setActive }: { active: ActiveView; setActive: (v: Act
       </nav>
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", borderRadius: 11, background: "#dddee2" }}>
-          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 13, letterSpacing: .3, flexShrink: 0 }}>JM</div>
+          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 13, letterSpacing: .3, flexShrink: 0 }}>
+            {initialsFromEmail(authState.email)}
+          </div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Joshua Mendel</div>
-            <div style={{ fontSize: 11.5, color: "#83868d" }}>re:Write Pro</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
+            <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
           </div>
         </div>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version 1.3.1</div>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version 0.1.2</div>
       </div>
     </aside>
   );
@@ -215,7 +321,7 @@ function Sidebar({ active, setActive }: { active: ActiveView; setActive: (v: Act
 
 // ── Home View ──────────────────────────────────────────────────────────────────
 
-function HomeView({ history, skillsConfig, config }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config }) {
+function HomeView({ history, skillsConfig, config, authState }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config; authState: AuthState }) {
   const greet = getGreeting();
   const { streakDays, weekDots } = computeStreak(history);
   const { total, last7, weekWords } = computeWordStats(history);
@@ -224,7 +330,7 @@ function HomeView({ history, skillsConfig, config }: { history: HistoryEntry[]; 
   const DAY_LABELS = ["M", "T", "W", "T", "F", "S", "S"];
 
   const onboarding = [
-    { done: history.length > 0,                                                    label: "re:Write your first email" },
+    { done: history.length > 0,                                                    label: "reWrite your first email" },
     { done: skillsConfig.skills.length > 0,                                        label: "Craft your first skill" },
     { done: config.super_hotkey !== "ctrl+shift+period",                           label: "Set up your super hotkey" },
     { done: history.some((e) => e.skill_id === "__summarise__"),                   label: "Summarise your meeting notes" },
@@ -235,7 +341,7 @@ function HomeView({ history, skillsConfig, config }: { history: HistoryEntry[]; 
     <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both" }}>
       <header style={{ marginBottom: 34 }}>
         <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 50, lineHeight: 1.02, color: "#16161a", letterSpacing: -.5 }}>
-          {greet}, Joshua
+          {greet}, {firstNameFromEmail(authState.email)}
         </h1>
         <p style={{ fontSize: 16, color: "#74777e", marginTop: 10 }}>Let's knock something off your to-do list.</p>
       </header>
@@ -285,7 +391,7 @@ function HomeView({ history, skillsConfig, config }: { history: HistoryEntry[]; 
         {/* Onboarding */}
         <div style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 16, padding: "26px 28px" }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 20 }}>
-            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "#16161a" }}>Get to know re:Write</h3>
+            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "#16161a" }}>Get to know reWrite</h3>
             <span style={{ fontSize: 12.5, color: "#9a9da3", fontWeight: 500 }}>{doneCount} of {onboarding.length}</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -313,7 +419,7 @@ function HomeView({ history, skillsConfig, config }: { history: HistoryEntry[]; 
             </div>
           </div>
           <div style={{ padding: "18px 14px 2px" }}>
-            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "#16161a" }}>Introducing re:Write</h3>
+            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "#16161a" }}>Introducing reWrite</h3>
             <p style={{ fontSize: 14.5, color: "#74777e", marginTop: 6, lineHeight: 1.45 }}>Your daily tasks, made easier — every word in your voice.</p>
           </div>
         </div>
@@ -418,7 +524,7 @@ function HistoryView({ history }: { history: HistoryEntry[] }) {
       {history.length === 0 ? (
         <div style={{ textAlign: "center", padding: "80px 40px", color: "#a7aab0" }}>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>Nothing here yet</div>
-          <div style={{ fontSize: 14.5, color: "#74777e" }}>Your rewrites will appear here after you use re:Write for the first time.</div>
+          <div style={{ fontSize: 14.5, color: "#74777e" }}>Your rewrites will appear here after you use reWrite for the first time.</div>
         </div>
       ) : groups.length === 0 ? (
         <div style={{ textAlign: "center", padding: "60px 40px", color: "#a7aab0", fontSize: 14.5 }}>No results match your filter.</div>
@@ -659,7 +765,7 @@ function SkillsView() {
       <header style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 24 }}>
         <div>
           <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 46, lineHeight: 1.02, color: "#16161a", letterSpacing: -.5 }}>Skills</h1>
-          <p style={{ fontSize: 16, color: "#74777e", marginTop: 9 }}>Teach re:Write the voice you want. Toggle to show or hide in the overlay.</p>
+          <p style={{ fontSize: 16, color: "#74777e", marginTop: 9 }}>Teach reWrite the voice you want. Toggle to show or hide in the overlay.</p>
         </div>
         <button onClick={() => setShowCreate(true)} style={{ display: "flex", alignItems: "center", gap: 9, background: "#16161a", color: "#fff", borderRadius: 11, padding: "12px 18px", fontSize: 14.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap", border: "none", fontFamily: "inherit" }}>
           <svg width="16" height="16" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2" strokeLinecap="round" fill="none"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
@@ -693,7 +799,7 @@ function SkillsView() {
         {config.skills.length === 0 ? (
           <div style={{ textAlign: "center", padding: "48px 40px", border: "1.5px dashed #d2d4d8", borderRadius: 15 }}>
             <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>No custom skills yet</div>
-            <div style={{ fontSize: 14.5, color: "#74777e", marginBottom: 22 }}>Create your first skill to extend re:Write with your own voice.</div>
+            <div style={{ fontSize: 14.5, color: "#74777e", marginBottom: 22 }}>Create your first skill to extend reWrite with your own voice.</div>
             <button onClick={() => setShowCreate(true)} style={{ fontSize: 14.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 11, padding: "11px 22px", cursor: "pointer", fontFamily: "inherit" }}>Create a skill</button>
           </div>
         ) : (
@@ -711,7 +817,7 @@ function SkillsView() {
 
 // ── Settings View ──────────────────────────────────────────────────────────────
 
-function SettingsView() {
+function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout: () => void }) {
   const [hotkey, setHotkey] = useState("ctrl+shift+r");
   const [superHotkey, setSuperHotkey] = useState("ctrl+shift+period");
   const [defaultSkillId, setDefaultSkillId] = useState("__proofread__");
@@ -817,30 +923,58 @@ function SettingsView() {
       </header>
 
       <div style={{ maxWidth: 720, display: "flex", flexDirection: "column", gap: 22 }}>
-        {/* Account placeholder */}
+        {/* Account */}
         <section style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 15, padding: "22px 24px", display: "flex", alignItems: "center", gap: 18 }}>
-          <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 18, flexShrink: 0 }}>JM</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 17, fontWeight: 600, color: "#1f2026" }}>Joshua Mendel</div>
-            <div style={{ fontSize: 13.5, color: "#86898f", marginTop: 2 }}>joshua@rewrite.app</div>
+          <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 18, flexShrink: 0 }}>
+            {initialsFromEmail(authState.email)}
           </div>
-          <button style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "9px 15px", cursor: "pointer", fontFamily: "inherit" }}>Manage account</button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{firstNameFromEmail(authState.email)}</div>
+            <div style={{ fontSize: 13.5, color: "#86898f", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
+          </div>
+          <button
+            onClick={async () => { await invoke("logout"); onLogout(); }}
+            style={{ fontSize: 13.5, fontWeight: 600, color: "#c0392b", background: "#fdf1f1", border: "1px solid #fad8d8", borderRadius: 9, padding: "9px 15px", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}
+          >
+            Sign out
+          </button>
         </section>
 
-        {/* Plan & billing placeholder */}
+        {/* Plan & billing */}
         <section style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 15, padding: 24, overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
             <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 20, color: "#16161a" }}>Plan &amp; billing</h3>
-            <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: .5, textTransform: "uppercase", color: "#fff", background: ACCENT, padding: "5px 11px", borderRadius: 7 }}>Pro</span>
+            <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: .5, textTransform: "uppercase", color: authState.is_subscribed ? "#fff" : "#5b5e66", background: authState.is_subscribed ? ACCENT : "#f1f2f4", padding: "5px 11px", borderRadius: 7, border: authState.is_subscribed ? "none" : "1px solid #e3e4e7" }}>
+              {authState.is_subscribed ? "Pro" : "Free"}
+            </span>
           </div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 6 }}>
-            <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 38, fontWeight: 700, color: "#16161a" }}>$12</span>
-            <span style={{ fontSize: 14, color: "#86898f", marginBottom: 8 }}>/ month · renews Jul 12, 2026</span>
-          </div>
-          <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
-            <button style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Change plan</button>
-            <button style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Manage billing</button>
-          </div>
+
+          {authState.is_subscribed ? (
+            <>
+              <div style={{ fontSize: 15, color: "#5b5e66" }}>
+                {authState.subscription_valid_until
+                  ? <>Renews <strong style={{ color: "#1f2026" }}>{formatRenewalDate(authState.subscription_valid_until)}</strong></>
+                  : "Active subscription"}
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
+                <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Change plan</button>
+                <button onClick={() => invoke("open_billing_portal")} style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Manage billing</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 15, color: "#5b5e66", marginBottom: 14 }}>
+                <strong style={{ color: "#1f2026" }}>{authState.rewrite_count}</strong> / 30 rewrites used this month
+              </div>
+              <div style={{ background: "#f3f4f5", borderRadius: 8, height: 6, overflow: "hidden" }}>
+                <div style={{ background: authState.rewrite_count >= 28 ? "#c0392b" : "#16161a", height: "100%", width: `${Math.min((authState.rewrite_count / 30) * 100, 100)}%`, borderRadius: 8, transition: "width .3s" }} />
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
+                <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Pro</button>
+                <button onClick={() => invoke("open_checkout", { plan: "max" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Max</button>
+              </div>
+            </>
+          )}
         </section>
 
         {/* Preferences */}
@@ -920,13 +1054,13 @@ function SettingsView() {
           />
           {divider}
 
-          <PrefRow label="Launch on startup" sub="Open re:Write when you sign in" right={<Toggle on={startup} onToggle={() => setStartup((s) => !s)} />} />
+          <PrefRow label="Launch on startup" sub="Open reWrite when you sign in" right={<Toggle on={startup} onToggle={() => setStartup((s) => !s)} />} />
           {divider}
           <PrefRow label="Sound on rewrite" sub="Play a chime when text is ready" right={<Toggle on={sounds} onToggle={() => setSounds((s) => !s)} />} />
         </section>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 6px 8px" }}>
-          <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 14, color: "#9a9da3" }}>re:Write 1.3.1 — you're up to date.</div>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 14, color: "#9a9da3" }}>reWrite 1.3.1 — you're up to date.</div>
           <button style={{ fontSize: 13, fontWeight: 600, color: "#86898f", background: "transparent", border: "none", cursor: "pointer", padding: "6px 4px", fontFamily: "inherit" }}>Check for updates</button>
         </div>
       </div>
@@ -941,6 +1075,18 @@ export default function Settings() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
   const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400 });
+  const [authState, setAuthState] = useState<AuthState | null>(null);
+
+  async function loadAuthState() {
+    const state = await invoke<AuthState>("get_auth_state");
+    setAuthState(state);
+  }
+
+  useEffect(() => {
+    loadAuthState();
+    const unlisten = listen("auth:complete", () => loadAuthState());
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -954,14 +1100,20 @@ export default function Settings() {
     });
   }, [active]);
 
+  // Loading
+  if (authState === null) return null;
+
+  // Not logged in
+  if (!authState.logged_in) return <LoginView onLogin={loadAuthState} />;
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", fontFamily: "'Hanken Grotesk', system-ui, sans-serif", background: "#e6e7ea" }}>
-      <Sidebar active={active} setActive={setActive} />
+      <Sidebar active={active} setActive={setActive} authState={authState} />
       <main className="rw-scroll" style={{ flex: 1, overflowY: "auto", background: "#fff", position: "relative" }}>
-        {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} />}
+        {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} authState={authState} />}
         {active === "history"  && <HistoryView history={history} />}
         {active === "skills"   && <SkillsView />}
-        {active === "settings" && <SettingsView />}
+        {active === "settings" && <SettingsView authState={authState} onLogout={loadAuthState} />}
       </main>
     </div>
   );
