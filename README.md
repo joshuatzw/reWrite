@@ -1,4 +1,4 @@
-# re:Write
+# reWrite
 
 **System-wide AI text transformer for Windows.**
 
@@ -8,7 +8,7 @@ Highlight any text, press a hotkey, pick a rewrite style — the result replaces
 
 ## What it does
 
-re:Write sits in the system tray and listens for two global hotkeys:
+reWrite sits in the system tray and listens for two global hotkeys:
 
 | Hotkey | Action |
 |---|---|

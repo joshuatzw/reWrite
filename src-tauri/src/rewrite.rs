@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 
 const EDGE_FUNCTION_URL: &str =
     "https://jrzcedtyqyzfqbfuabxa.supabase.co/functions/v1/rewrite";
-const SUPABASE_ANON_KEY: &str =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyemNlZHR5cXl6ZnFiZnVhYnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzNjk2ODUsImV4cCI6MjA5Nzk0NTY4NX0.Qe5HCqlmP8z--ZsI3w8uw1QtMF60udrWV7XsuT9Lay4";
 
 #[derive(Serialize)]
 struct EdgeRequest {
@@ -21,6 +19,7 @@ struct EdgeResponse {
 
 pub async fn call_api_raw(
     client: &reqwest::Client,
+    access_token: &str,
     system: &str,
     user_message: &str,
     model: &str,
@@ -33,10 +32,29 @@ pub async fn call_api_raw(
 
     let response = client
         .post(EDGE_FUNCTION_URL)
-        .header("Authorization", format!("Bearer {SUPABASE_ANON_KEY}"))
+        .header("Authorization", format!("Bearer {access_token}"))
         .json(&body)
         .send()
         .await?;
+
+    // Surface limit/subscription errors as typed codes the frontend can act on
+    if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
+        let detail: serde_json::Value = response.json().await.unwrap_or_default();
+        let code = detail
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or("limit_reached");
+        return Err(anyhow!("{code}"));
+    }
+
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        let detail: serde_json::Value = response.json().await.unwrap_or_default();
+        let message = detail
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("This request is outside reWrite's scope of text rewriting, refining, and translation.");
+        return Err(anyhow!("{message}"));
+    }
 
     if !response.status().is_success() {
         let status = response.status();

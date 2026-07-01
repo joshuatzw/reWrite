@@ -49,6 +49,7 @@ export default function Overlay() {
   const statusRef = useRef<Status>("idle");
   const itemsRef = useRef<SkillItem[]>(EMPTY_SKILL_ITEMS);
   const cancelledRef = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const setStatus = useCallback((s: Status) => {
     statusRef.current = s;
@@ -73,6 +74,7 @@ export default function Overlay() {
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
         if (!focused || statusRef.current === "loading") return;
+        containerRef.current?.focus();
         setStatus("idle");
         setError(null);
         setFocusedIndex(0);
@@ -139,7 +141,7 @@ export default function Overlay() {
     : null;
 
   return (
-    <div style={{ width: "100vw", height: "100vh", background: "transparent", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
+    <div ref={containerRef} tabIndex={-1} style={{ outline: "none", width: "100vw", height: "100vh", background: "transparent", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
       <div style={{
         width: "100%", height: "100%", borderRadius: 18,
         border: "1px solid #e0e1e4",
