@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     OnceLock,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -70,7 +70,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 if let Some(w) = app.get_webview_window("overlay") {
                     if w.is_visible().unwrap_or(false) {
                         stop();
-                        let _ = w.hide();
+                        // Forward Esc to the overlay's own close handler (the
+                        // same one the X button uses) instead of hiding from
+                        // this hook thread. A hide issued here runs
+                        // ShowWindow(SW_HIDE) from a thread that doesn't own the
+                        // window; Windows ignores that for a foreground window,
+                        // so Esc silently did nothing whenever the overlay itself
+                        // had focus. Routing through JS makes the hide run on the
+                        // window's owning main thread, which works regardless of
+                        // focus.
+                        let _ = app.emit_to("overlay", "overlay:esc", ());
                         return 1; // consume the keypress
                     }
                 }

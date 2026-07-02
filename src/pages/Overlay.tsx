@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import type { SkillsConfig } from "../types";
 import { BUILTIN_SKILLS } from "../skills";
 
@@ -58,6 +59,17 @@ export default function Overlay() {
     _setStatus(s);
   }, []);
 
+  // Single close path used by the X button, the Esc key, and the global Esc
+  // hook (via the "overlay:esc" event). Hiding through this JS call runs the
+  // hide IPC on the window's owning main thread, which works even when the
+  // overlay is the focused foreground window — unlike a hide issued directly
+  // from the low-level keyboard-hook thread.
+  const closeOverlay = useCallback(() => {
+    cancelledRef.current = true;
+    setStatus("idle");
+    getCurrentWindow().hide();
+  }, [setStatus]);
+
   const refreshData = useCallback(async () => {
     const [text, cfg] = await Promise.all([
       invoke<string | null>("get_captured_text"),
@@ -89,12 +101,21 @@ export default function Overlay() {
     return () => unlisten?.();
   }, [refreshData, setStatus]);
 
+  // The global Esc hook consumes the keypress before the webview sees it, so
+  // it forwards Esc as an event. Route it through the same close handler as
+  // the X button. This also covers the case where the overlay is not focused.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("overlay:esc", () => closeOverlay()).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [closeOverlay]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        cancelledRef.current = true;
-        setStatus("idle");
-        getCurrentWindow().hide();
+        closeOverlay();
         return;
       }
 
@@ -145,6 +166,7 @@ export default function Overlay() {
   return (
     <div ref={containerRef} tabIndex={-1} style={{ outline: "none", width: "100vw", height: "100vh", background: "transparent", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
       <div style={{
+        position: "relative",
         width: "100%", height: "100%", borderRadius: 18,
         border: "1px solid #e0e1e4",
         background: "#fff",
@@ -153,6 +175,31 @@ export default function Overlay() {
         display: "flex", flexDirection: "column",
         userSelect: "none",
       }}>
+        {/* Close button */}
+        <button
+          onClick={closeOverlay}
+          aria-label="Close"
+          title="Close (Esc)"
+          style={{
+            position: "absolute", top: 12, right: 12,
+            width: 26, height: 26, borderRadius: 8,
+            border: "none", background: "transparent",
+            color: "#b6b9bf", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 18, lineHeight: 1, padding: 0,
+            transition: "background .1s, color .1s",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "#f0f1f3";
+            e.currentTarget.style.color = "#16161a";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "#b6b9bf";
+          }}
+        >
+          ×
+        </button>
         {/* Header */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
