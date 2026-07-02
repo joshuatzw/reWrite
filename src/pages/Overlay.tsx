@@ -39,6 +39,8 @@ function buildItems(cfg: SkillsConfig): SkillItem[] {
 
 const EMPTY_SKILL_ITEMS = buildItems({ global_instructions: "", skills: [], builtin_enabled: {} });
 
+const isLimitError = (msg: string) => /limit|trial|quota|upgrade/i.test(msg);
+
 export default function Overlay() {
   const [status, _setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +224,26 @@ export default function Overlay() {
             </div>
 
             {status === "error" && error && (
-              <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8 }}>{error}</p>
+              isLimitError(error) ? (
+                <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8, lineHeight: 1.5 }}>
+                  You have used up your free trial limit. Please{" "}
+                  <a
+                    onClick={() => {
+                      // Dismiss the overlay first (while its JS is still
+                      // foreground) so it doesn't cover the Settings window,
+                      // then open Settings without blocking on the round-trip.
+                      getCurrentWindow().hide();
+                      invoke("open_settings").catch(() => {});
+                    }}
+                    style={{ color: "#c0392b", fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
+                  >
+                    renew to Pro or Max plans
+                  </a>{" "}
+                  to continue using reWrite.
+                </p>
+              ) : (
+                <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8 }}>{error}</p>
+              )
             )}
 
             <p style={{ fontSize: 11, color: "#c4c6cb", textAlign: "center", letterSpacing: .2 }}>

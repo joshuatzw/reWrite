@@ -15,6 +15,15 @@ struct EdgeRequest {
 struct EdgeResponse {
     text: Option<String>,
     error: Option<String>,
+    rewrite_count: Option<u32>,
+}
+
+/// Result of a rewrite call: the transformed text plus the caller's updated
+/// monthly usage count (as recorded server-side), when the Edge Function
+/// reports it.
+pub struct RewriteResult {
+    pub text: String,
+    pub rewrite_count: Option<u32>,
 }
 
 pub async fn call_api_raw(
@@ -23,7 +32,7 @@ pub async fn call_api_raw(
     system: &str,
     user_message: &str,
     model: &str,
-) -> Result<String> {
+) -> Result<RewriteResult> {
     let body = EdgeRequest {
         system_prompt: system.to_string(),
         user_message: user_message.to_string(),
@@ -68,5 +77,6 @@ pub async fn call_api_raw(
         return Err(anyhow!("{err}"));
     }
 
-    parsed.text.ok_or_else(|| anyhow!("No text in response"))
+    let text = parsed.text.ok_or_else(|| anyhow!("No text in response"))?;
+    Ok(RewriteResult { text, rewrite_count: parsed.rewrite_count })
 }

@@ -38,7 +38,9 @@ serve(async (req) => {
 
   const portalSession = await stripe.billingPortal.sessions.create({
     customer: profile.stripe_customer_id,
-    return_url: "rewrite://portal-return",
+    // Hosted landing page that bounces back into the desktop app via the
+    // rewrite:// deep link — Stripe rejects a raw custom-scheme return_url.
+    return_url: Deno.env.get("PORTAL_RETURN_URL") ?? "https://www.rewriteai.dev/portal/return",
   });
 
   return json({ url: portalSession.url });

@@ -20,6 +20,12 @@
       "desktop": {
         "schemes": ["rewrite"]
       }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/joshuatzw/reWrite/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzNjI3NUFFQzQzQjQ4MUQKUldRZFNEdkVyblZpSThFcEJkelRFK0pubzRUdzBrQmNOcUhGSGl5QjZwblFYUm5EdE1yUFQ4U3cK"
     }
   },
   "bundle": {

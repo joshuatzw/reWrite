@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
+import { resolvePlan } from "../_shared/plan.ts";
 
 serve(async (req) => {
   if (req.method !== "POST") {
@@ -37,15 +38,19 @@ serve(async (req) => {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
-      if (session.mode !== "subscription" || !session.customer || !session.customer_details?.email) {
-        break;
-      }
-      // Idempotent: upsert stripe_customer_id link (may already be set by create-checkout-session)
-      const { data } = await admin.auth.admin.getUserByEmail(session.customer_details.email);
-      if (data.user) {
+      if (session.mode !== "subscription" || !session.customer) break;
+
+      // Idempotent: upsert stripe_customer_id link (may already be set by
+      // create-checkout-session). Resolve the Supabase user via the Stripe
+      // customer's metadata rather than by email — there is no
+      // getUserByEmail on the admin API, and email isn't guaranteed unique.
+      const customerId = session.customer as string;
+      const customer = await stripe.customers.retrieve(customerId);
+      const supabaseUserId = !customer.deleted ? customer.metadata?.supabase_user_id : undefined;
+      if (supabaseUserId) {
         await admin.from("profiles").update({
-          stripe_customer_id: session.customer as string,
-        }).eq("id", data.user.id);
+          stripe_customer_id: customerId,
+        }).eq("id", supabaseUserId);
       }
       break;
     }
@@ -62,6 +67,7 @@ serve(async (req) => {
         subscription_valid_until: isActive && sub.current_period_end
           ? new Date(sub.current_period_end * 1000).toISOString()
           : null,
+        plan: isActive ? resolvePlan(sub.items.data[0]?.price?.id) : null,
         last_synced_at: new Date().toISOString(),
       }).eq("stripe_customer_id", customerId);
       break;

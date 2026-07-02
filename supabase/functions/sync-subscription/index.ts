@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import Stripe from "npm:stripe@17";
 import { corsHeaders, handleCors, json } from "../_shared/cors.ts";
+import { resolvePlan } from "../_shared/plan.ts";
 
 serve(async (req) => {
   const corsRes = handleCors(req);
@@ -60,10 +61,12 @@ serve(async (req) => {
   const trial_end = active?.trial_end
     ? new Date((active.trial_end as number) * 1000).toISOString()
     : null;
+  const plan = active ? resolvePlan(active.items.data[0]?.price?.id) : null;
 
   await admin.from("profiles").update({
     is_subscribed,
     subscription_valid_until,
+    plan,
     last_synced_at: new Date().toISOString(),
   }).eq("id", user.id);
 

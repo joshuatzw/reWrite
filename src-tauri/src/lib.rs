@@ -73,10 +73,20 @@ pub fn show_processing(app: &AppHandle) {
         .always_on_top(true)
         .transparent(true)
         .skip_taskbar(true)
-        .inner_size(160.0, 160.0)
+        .inner_size(240.0, 240.0)
         .center()
         .focused(false)
         .build();
+}
+
+/// Switch the processing indicator to its "out of free rewrites" state — a red
+/// glow — without rebuilding the window. The window is expected to already be
+/// visible from a prior `show_processing` call.
+pub fn show_processing_limit(app: &AppHandle) {
+    let _ = app.emit("processing:limit", ());
+    if let Some(w) = app.get_webview_window("processing") {
+        let _ = w.show();
+    }
 }
 
 pub fn hide_processing(app: &AppHandle) {
@@ -85,11 +95,27 @@ pub fn hide_processing(app: &AppHandle) {
     }
 }
 
+/// Whether a rewrite error corresponds to the user exhausting their free
+/// rewrites / subscription limit (HTTP 402 codes surfaced by `call_api_raw`).
+fn is_limit_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("limit") || m.contains("trial") || m.contains("quota") || m.contains("upgrade")
+}
+
 pub fn show_settings(app: &AppHandle) {
-    if focus_existing(app, "settings") {
+    // The Settings window is pre-warmed (hidden) at startup, so opening it is
+    // just a show + focus — we never build a webview at runtime here. Building
+    // a second webview from a command/menu callback on Windows can deadlock the
+    // main event loop (the new window paints blank and the app freezes), so the
+    // window must already exist. The build path below is only a safety net for
+    // the unlikely case that pre-warming failed.
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
         return;
     }
-    let _ = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
+    if let Ok(w) = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
         .title("reWrite — Settings")
         .decorations(true)
         .always_on_top(false)
@@ -97,7 +123,10 @@ pub fn show_settings(app: &AppHandle) {
         .min_inner_size(900.0, 600.0)
         .center()
         .resizable(true)
-        .build();
+        .build()
+    {
+        let _ = w.set_focus();
+    }
 }
 
 // ── Deep-link handler ─────────────────────────────────────────────────────────
@@ -123,6 +152,26 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
     if url.starts_with("rewrite://checkout-cancelled") {
         show_settings(app);
+        return;
+    }
+
+    // Returning from the Stripe billing portal — the user may have changed
+    // plan or cancelled, so re-sync subscription state.
+    if url.starts_with("rewrite://portal-return") {
+        show_settings(app);
+
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(state) = app.try_state::<AppState>() else { return };
+            let access_token = state.auth_session.lock().unwrap().as_ref().map(|s| s.access_token.clone());
+            let Some(access_token) = access_token else { return };
+
+            if let Ok(sub) = auth::sync_subscription(&state.http_client, &access_token).await {
+                *state.subscription.lock().unwrap() = sub;
+            }
+
+            let _ = app.emit("auth:complete", ());
+        });
         return;
     }
 
@@ -255,13 +304,28 @@ fn on_super_hotkey(app: &AppHandle) {
         let client = state.http_client.clone();
         let user_message = format!("<text>\n{text}\n</text>");
 
-        let output = match rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model).await {
+        let result = match rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model).await {
             Ok(o) => o,
-            Err(_) => {
+            Err(e) => {
+                if is_limit_error(&e.to_string()) {
+                    // Show the red "out of free rewrites" glow briefly, then dismiss.
+                    show_processing_limit(&app);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(2200)).await;
+                }
                 hide_processing(&app);
                 return;
             }
         };
+        let output = result.text;
+
+        // Keep the local usage cache in step with the server-side count so the
+        // Settings usage figure reflects super-hotkey rewrites too.
+        if let Some(count) = result.rewrite_count {
+            if let Ok(mut sub) = state.subscription.lock() {
+                sub.rewrite_count = count;
+            }
+            let _ = app.emit("usage:updated", ());
+        }
 
         {
             let entry = history::HistoryEntry {
@@ -302,6 +366,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -420,6 +486,20 @@ pub fn run() {
                 });
             }
 
+            // ── Background update check ───────────────────────────────────────
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_updater::UpdaterExt;
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let Ok(updater) = app_handle.updater() else { return };
+                    let Ok(Some(update)) = updater.check().await else { return };
+                    if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+                        app_handle.request_restart();
+                    }
+                });
+            }
+
             // ── Deep-link handler ─────────────────────────────────────────────
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -495,7 +575,7 @@ pub fn run() {
             .always_on_top(true)
             .transparent(true)
             .skip_taskbar(true)
-            .inner_size(160.0, 160.0)
+            .inner_size(240.0, 240.0)
             .center()
             .focused(false)
             .visible(false)
@@ -506,6 +586,39 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = proc_ref.hide();
+                    }
+                });
+            }
+
+            // ── Pre-warm settings ─────────────────────────────────────────────
+            // Build the (large, webview-heavy) Settings window once, hidden, so
+            // that opening it later is a cheap show()/set_focus(). Building it on
+            // demand from the overlay's `open_settings` command deadlocked the
+            // main event loop on Windows, leaving both the overlay stuck on
+            // screen and the Settings webview blank. Pre-warming sidesteps that
+            // entirely and makes the window paint instantly when revealed.
+            if let Ok(settings) = tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "settings",
+                tauri::WebviewUrl::App("".into()),
+            )
+            .title("reWrite — Settings")
+            .decorations(true)
+            .always_on_top(false)
+            .inner_size(1260.0, 870.0)
+            .min_inner_size(900.0, 600.0)
+            .center()
+            .resizable(true)
+            .visible(false)
+            .build()
+            {
+                let settings_ref = settings.clone();
+                settings.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Keep the window warm: hide instead of destroying it so
+                        // it can be reopened instantly and never needs rebuilding.
+                        api.prevent_close();
+                        let _ = settings_ref.hide();
                     }
                 });
             }

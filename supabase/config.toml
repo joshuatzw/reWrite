@@ -1,0 +1,29 @@
+project_id = "jrzcedtyqyzfqbfuabxa"
+
+# rewrite validates the Supabase JWT itself and needs the platform-level
+# gate too — callers always carry a real user access token.
+[functions.rewrite]
+verify_jwt = true
+
+[functions.create-checkout-session]
+verify_jwt = true
+
+[functions.create-portal-session]
+verify_jwt = true
+
+[functions.sync-subscription]
+verify_jwt = true
+
+# Stripe calls this with a `stripe-signature` header, never a Supabase JWT —
+# platform-level JWT verification must be off or every webhook 401s before
+# the in-function signature check ever runs.
+[functions.stripe-webhook]
+verify_jwt = false
+
+# Hit directly by the user's bare browser on Stripe's checkout redirect —
+# no Authorization header present.
+[functions.checkout-success]
+verify_jwt = false
+
+[functions.checkout-cancel]
+verify_jwt = false
