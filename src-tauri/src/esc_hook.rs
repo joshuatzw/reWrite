@@ -3,7 +3,7 @@ use std::sync::{
     OnceLock,
 };
 // AtomicIsize used for HOOK handle (HHOOK is isize on Windows)
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -63,20 +63,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 if let Some(w) = app.get_webview_window("overlay") {
                     if w.is_visible().unwrap_or(false) {
                         stop();
-                        // Hide on the window's owning (main) thread. Calling
-                        // w.hide() directly here runs ShowWindow(SW_HIDE) from the
-                        // hook thread; Windows ignores that call for a foreground
-                        // window owned by another thread, so Esc silently did
-                        // nothing whenever the overlay itself had focus (it only
-                        // worked once the user clicked away and the overlay was no
-                        // longer foreground). Marshalling the hide onto the main
-                        // thread makes it reliable regardless of focus.
-                        let app = app.clone();
-                        let _ = app.clone().run_on_main_thread(move || {
-                            if let Some(w) = app.get_webview_window("overlay") {
-                                let _ = w.hide();
-                            }
-                        });
+                        // Forward Esc to the overlay's own close handler (the
+                        // same one the X button uses) instead of hiding from
+                        // this hook thread. A hide issued here runs
+                        // ShowWindow(SW_HIDE) from a thread that doesn't own the
+                        // window; Windows ignores that for a foreground window,
+                        // so Esc silently did nothing whenever the overlay itself
+                        // had focus. Routing through JS makes the hide run on the
+                        // window's owning main thread, which works regardless of
+                        // focus.
+                        let _ = app.emit_to("overlay", "overlay:esc", ());
                         return 1; // consume the keypress
                     }
                 }
