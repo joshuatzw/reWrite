@@ -2,12 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for all reWrite windows",
-  "windows": ["overlay", "settings"],
+  "windows": ["overlay", "settings", "processing"],
   "permissions": [
     "core:default",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
     "opener:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
+    "global-shortcut:allow-is-registered",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

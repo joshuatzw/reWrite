@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
+import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
 
 interface AuthState {
@@ -16,6 +19,7 @@ import logoBlack from "../assets/rewrite_logo_black.png";
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const ACCENT = "#16161a";
+const FREE_TIER_MONTHLY_LIMIT = 3;
 
 const BUILTIN_SKILL_OPTIONS = BUILTIN_SKILLS.map((b) => ({ id: b.id, name: b.name }));
 
@@ -183,6 +187,13 @@ const IconGear = () => (
   </svg>
 );
 
+const IconLock = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
+    <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
+  </svg>
+);
+
 // ── Login view ────────────────────────────────────────────────────────────────
 
 function LoginView({ onLogin }: { onLogin: () => void }) {
@@ -266,7 +277,7 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
 
 type ActiveView = "home" | "history" | "skills" | "settings";
 
-function NavButton({ label, icon, active, onClick }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void }) {
+function NavButton({ label, icon, active, onClick, locked }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void; locked?: boolean }) {
   const [hov, setHov] = useState(false);
   return (
     <button
@@ -279,12 +290,14 @@ function NavButton({ label, icon, active, onClick }: { label: string; icon: Reac
         fontFamily: "'Hanken Grotesk', sans-serif", fontSize: 15.5, fontWeight: 500,
         cursor: "pointer", textAlign: "left", transition: "background .15s, color .15s",
         background: active ? "#fff" : hov ? "rgba(0,0,0,.04)" : "transparent",
-        color: active ? "#16161a" : "#44464d",
+        color: locked ? "#a7aab0" : active ? "#16161a" : "#44464d",
         border: active ? "1px solid #e3e4e7" : "1px solid transparent",
         boxShadow: active ? "0 1px 2px rgba(20,20,26,.10)" : "none",
       }}
     >
-      {icon}{label}
+      {icon}
+      <span style={{ flex: 1 }}>{label}</span>
+      {locked && <IconLock />}
     </button>
   );
 }
@@ -300,7 +313,7 @@ function Sidebar({ active, setActive, authState }: { active: ActiveView; setActi
       <nav style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
         <NavButton label="History"  icon={<IconHistory />} active={active === "history"}  onClick={() => setActive("history")} />
-        <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} />
+        <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} locked={!authState.is_subscribed} />
         <NavButton label="Settings" icon={<IconGear />}    active={active === "settings"} onClick={() => setActive("settings")} />
       </nav>
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
@@ -667,6 +680,26 @@ function SkillModal({ skill, allSkills, onSave, onClose, error }: { skill: Skill
   );
 }
 
+function SkillsLockedView() {
+  return (
+    <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both" }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "70px 40px", border: "1px solid #e8e9ec", borderRadius: 15, background: "#fbfbfc" }}>
+        <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20 }}>
+          <IconLock />
+        </div>
+        <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 28, color: "#16161a", marginBottom: 8 }}>Skills are a Pro feature</h1>
+        <p style={{ fontSize: 14.5, color: "#74777e", maxWidth: 380, marginBottom: 26, lineHeight: 1.5 }}>
+          Creating custom skills and managing built-ins is available on Pro and Max plans. Free plan rewrites still use the built-in skills from the overlay.
+        </p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Pro</button>
+          <button onClick={() => invoke("open_checkout", { plan: "max" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Max</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SkillsView() {
   const [config, setConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
   const [showCreate, setShowCreate] = useState(false);
@@ -836,6 +869,10 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
   const [startup, setStartup] = useState(true);
   const [sounds, setSounds] = useState(false);
 
+  const [appVersion, setAppVersion] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "up-to-date" | "downloading" | "ready" | "error">("idle");
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
   const newHotkeyRef = useRef<HTMLInputElement>(null);
   const newSuperHotkeyRef = useRef<HTMLInputElement>(null);
 
@@ -846,7 +883,27 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
       setDefaultSkillId(cfg.default_skill_id);
     });
     invoke<SkillsConfig>("get_skills_config").then(setSkillsConfig);
+    getVersion().then(setAppVersion);
   }, []);
+
+  async function handleCheckForUpdates() {
+    setUpdateStatus("checking");
+    setUpdateError(null);
+    try {
+      const update = await checkForUpdate();
+      if (!update) {
+        setUpdateStatus("up-to-date");
+        return;
+      }
+      setUpdateStatus("downloading");
+      await update.downloadAndInstall();
+      setUpdateStatus("ready");
+      await relaunch();
+    } catch (err) {
+      setUpdateStatus("error");
+      setUpdateError(String(err));
+    }
+  }
 
   useEffect(() => { if (editingHotkey) newHotkeyRef.current?.focus(); }, [editingHotkey]);
   useEffect(() => { if (editingSuperHotkey) newSuperHotkeyRef.current?.focus(); }, [editingSuperHotkey]);
@@ -964,10 +1021,10 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           ) : (
             <>
               <div style={{ fontSize: 15, color: "#5b5e66", marginBottom: 14 }}>
-                <strong style={{ color: "#1f2026" }}>{authState.rewrite_count}</strong> / 30 rewrites used this month
+                <strong style={{ color: "#1f2026" }}>{authState.rewrite_count}</strong> / {FREE_TIER_MONTHLY_LIMIT} rewrites used this month
               </div>
               <div style={{ background: "#f3f4f5", borderRadius: 8, height: 6, overflow: "hidden" }}>
-                <div style={{ background: authState.rewrite_count >= 28 ? "#c0392b" : "#16161a", height: "100%", width: `${Math.min((authState.rewrite_count / 30) * 100, 100)}%`, borderRadius: 8, transition: "width .3s" }} />
+                <div style={{ background: authState.rewrite_count >= FREE_TIER_MONTHLY_LIMIT - 1 ? "#c0392b" : "#16161a", height: "100%", width: `${Math.min((authState.rewrite_count / FREE_TIER_MONTHLY_LIMIT) * 100, 100)}%`, borderRadius: 8, transition: "width .3s" }} />
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
                 <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Pro</button>
@@ -1060,8 +1117,25 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
         </section>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 6px 8px" }}>
-          <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 14, color: "#9a9da3" }}>reWrite 1.3.1 — you're up to date.</div>
-          <button style={{ fontSize: 13, fontWeight: 600, color: "#86898f", background: "transparent", border: "none", cursor: "pointer", padding: "6px 4px", fontFamily: "inherit" }}>Check for updates</button>
+          <div
+            style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 14, color: updateStatus === "error" ? "#c05a4a" : "#9a9da3" }}
+            title={updateStatus === "error" ? updateError ?? undefined : undefined}
+          >
+            reWrite {appVersion}
+            {updateStatus === "idle" && " — check for updates any time."}
+            {updateStatus === "checking" && " — checking for updates…"}
+            {updateStatus === "up-to-date" && " — you're up to date."}
+            {updateStatus === "downloading" && " — downloading update…"}
+            {updateStatus === "ready" && " — restarting…"}
+            {updateStatus === "error" && " — couldn't check for updates."}
+          </div>
+          <button
+            onClick={handleCheckForUpdates}
+            disabled={updateStatus === "checking" || updateStatus === "downloading" || updateStatus === "ready"}
+            style={{ fontSize: 13, fontWeight: 600, color: "#86898f", background: "transparent", border: "none", cursor: "pointer", padding: "6px 4px", fontFamily: "inherit", opacity: (updateStatus === "checking" || updateStatus === "downloading" || updateStatus === "ready") ? 0.5 : 1 }}
+          >
+            {updateStatus === "checking" ? "Checking…" : updateStatus === "downloading" ? "Downloading…" : "Check for updates"}
+          </button>
         </div>
       </div>
     </div>
@@ -1084,8 +1158,21 @@ export default function Settings() {
 
   useEffect(() => {
     loadAuthState();
-    const unlisten = listen("auth:complete", () => loadAuthState());
-    return () => { unlisten.then((fn) => fn()); };
+    const unlistenAuth = listen("auth:complete", () => loadAuthState());
+    const unlistenUsage = listen("usage:updated", () => loadAuthState());
+    // The overlay's "renew" link opens this window straight to a given tab.
+    const unlistenNav = listen<ActiveView>("settings:navigate", (e) => setActive(e.payload));
+    return () => {
+      unlistenAuth.then((fn) => fn());
+      unlistenUsage.then((fn) => fn());
+      unlistenNav.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    const blockContextMenu = (e: MouseEvent) => e.preventDefault();
+    document.addEventListener("contextmenu", blockContextMenu);
+    return () => document.removeEventListener("contextmenu", blockContextMenu);
   }, []);
 
   useEffect(() => {
@@ -1112,7 +1199,7 @@ export default function Settings() {
       <main className="rw-scroll" style={{ flex: 1, overflowY: "auto", background: "#fff", position: "relative" }}>
         {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} authState={authState} />}
         {active === "history"  && <HistoryView history={history} />}
-        {active === "skills"   && <SkillsView />}
+        {active === "skills"   && (authState.is_subscribed ? <SkillsView /> : <SkillsLockedView />)}
         {active === "settings" && <SettingsView authState={authState} onLogout={loadAuthState} />}
       </main>
     </div>

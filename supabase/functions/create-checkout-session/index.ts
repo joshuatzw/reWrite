@@ -39,6 +39,9 @@ serve(async (req) => {
     const existing = await stripe.customers.list({ email: user.email, limit: 1 });
     if (existing.data.length > 0) {
       customerId = existing.data[0].id;
+      // Backfill metadata so the webhook can resolve this customer to a
+      // Supabase user without relying on email lookups.
+      await stripe.customers.update(customerId, { metadata: { supabase_user_id: user.id } });
     } else {
       const customer = await stripe.customers.create({
         email: user.email!,
@@ -65,9 +68,10 @@ serve(async (req) => {
     customer: customerId,
     mode: "subscription",
     line_items: [{ price: priceId, quantity: 1 }],
-    // Deep-link back to the desktop app
-    success_url: Deno.env.get("CHECKOUT_SUCCESS_URL") ?? "https://example.com",
-    cancel_url: Deno.env.get("CHECKOUT_CANCEL_URL") ?? "https://example.com",
+    // Hosted landing pages that bounce back into the desktop app via the
+    // rewrite:// deep link (Supabase can't serve renderable HTML itself).
+    success_url: Deno.env.get("CHECKOUT_SUCCESS_URL") ?? "https://www.rewriteai.dev/checkout/success",
+    cancel_url: Deno.env.get("CHECKOUT_CANCEL_URL") ?? "https://www.rewriteai.dev/checkout/cancel",
     allow_promotion_codes: true,
   });
 

@@ -1,10 +1,12 @@
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { monthlyLimitFor } from "../_shared/plan.ts";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION = "2023-06-01";
-const FREE_TIER_LIMIT = 30;
+// Bounds per-call token cost regardless of plan.
+const MAX_INPUT_CHARS = 20000;
 
 // Token the model is told to emit instead of complying when a request falls
 // outside text rewriting/refining/translation. Checked on the response below.
@@ -91,20 +93,25 @@ serve(async (req) => {
 
   const { data: profile } = await admin
     .from("profiles")
-    .select("is_subscribed, rewrite_count, rewrite_month")
+    .select("is_subscribed, plan")
     .eq("id", user.id)
     .single();
 
-  // Gate free-tier users
-  if (!profile?.is_subscribed) {
-    const currentMonth = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
-    const count = profile?.rewrite_month === currentMonth
-      ? (profile?.rewrite_count ?? 0)
-      : 0;
+  const monthlyLimit = monthlyLimitFor(profile?.is_subscribed ? profile.plan : null);
+  const currentMonth = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
 
-    if (count >= FREE_TIER_LIMIT) {
-      return json({ error: "Monthly limit reached", code: "limit_reached" }, 402);
-    }
+  // Atomically check + record usage (avoids a read-then-write race that
+  // would let concurrent requests all slip past the limit check).
+  const { data: usage, error: usageErr } = await admin.rpc("check_and_increment_usage", {
+    p_user_id: user.id,
+    p_month: currentMonth,
+    p_monthly_limit: monthlyLimit,
+  }).single();
+
+  if (usageErr) return json({ error: "Usage check failed" }, 500);
+
+  if (!usage.allowed) {
+    return json({ error: "Monthly limit reached", code: "limit_reached" }, 402);
   }
 
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
@@ -120,6 +127,13 @@ serve(async (req) => {
   const { system_prompt, user_message, model } = body;
   if (!system_prompt || !user_message || !model) {
     return json({ error: "Missing required fields: system_prompt, user_message, model" }, 400);
+  }
+
+  if (user_message.length > MAX_INPUT_CHARS) {
+    return json(
+      { error: `Text is too long — max ${MAX_INPUT_CHARS.toLocaleString()} characters per rewrite.` },
+      413,
+    );
   }
 
   if (looksLikeAbuse(system_prompt) || looksLikeAbuse(user_message)) {
@@ -168,17 +182,7 @@ serve(async (req) => {
     return json({ error: SCOPE_VIOLATION_MESSAGE, code: "scope_violation" }, 403);
   }
 
-  // Increment usage counter for free-tier users (fire-and-forget, non-blocking)
-  if (!profile?.is_subscribed) {
-    const currentMonth = new Date().toISOString().slice(0, 7);
-    const sameMonth = profile?.rewrite_month === currentMonth;
-    admin.from("profiles").update({
-      rewrite_count: sameMonth ? (profile?.rewrite_count ?? 0) + 1 : 1,
-      rewrite_month: currentMonth,
-    }).eq("id", user.id);
-  }
-
-  return new Response(JSON.stringify({ text }), {
+  return new Response(JSON.stringify({ text, rewrite_count: usage.monthly_count }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 });

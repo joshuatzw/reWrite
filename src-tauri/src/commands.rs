@@ -1,5 +1,5 @@
 use std::sync::{Mutex, MutexGuard};
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::AppState;
 
@@ -100,13 +100,22 @@ pub async fn rewrite_with_skill(
     let system = crate::skills::build_system_prompt(&skills_config, Some(&effective_skill_id));
     let user_message = format!("<text>\n{text}\n</text>");
 
-    let output = crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
+    let result = crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
         .await
         .map_err(|e| e.to_string())?;
 
-    log_history(&app, &state, &effective_skill_id, &text, &output);
+    log_history(&app, &state, &effective_skill_id, &text, &result.text);
 
-    Ok(output)
+    // Keep the local usage cache in step with the server-side count so the
+    // Settings "rewrites used this month" figure updates without a full re-sync.
+    if let Some(count) = result.rewrite_count {
+        if let Ok(mut sub) = state.subscription.lock() {
+            sub.rewrite_count = count;
+        }
+        let _ = app.emit("usage:updated", ());
+    }
+
+    Ok(result.text)
 }
 
 // ── Config commands ───────────────────────────────────────────────────────────
@@ -135,7 +144,24 @@ pub fn save_config(
 
 #[tauri::command]
 pub fn open_settings(app: AppHandle) {
-    crate::show_settings(&app);
+    // Marshal the whole sequence onto the main event-loop thread — every
+    // window operation here must run there. We dismiss the overlay and tear
+    // down its low-level Esc hook first (leaving the global keyboard hook armed
+    // while another window takes focus is a needless liability), then reveal
+    // the pre-warmed Settings window.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(overlay) = handle.get_webview_window("overlay") {
+            let _ = overlay.hide();
+        }
+        #[cfg(target_os = "windows")]
+        crate::esc_hook::stop();
+        crate::show_settings(&handle);
+        // Land on the Settings tab (plan & billing) rather than Home — this
+        // path is only reached from the overlay's "renew" link. The pre-warmed
+        // window registers its listener at startup, so the event is live.
+        let _ = handle.emit("settings:navigate", "settings");
+    });
 }
 
 #[tauri::command]

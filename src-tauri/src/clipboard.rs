@@ -9,10 +9,51 @@ fn copy_paste_mod() -> Key {
     if cfg!(target_os = "macos") { Key::Meta } else { Key::Control }
 }
 
+/// Block until the user has physically released every modifier key that could
+/// be held from the triggering hotkey (Ctrl/Shift/Alt/Win), or until `timeout`
+/// elapses. This is essential before we synthesize Ctrl+C: if the user's
+/// physical Ctrl-up lands in the middle of our synthetic Ctrl+C, the `c` is
+/// seen without a modifier and gets typed as a literal character — overwriting
+/// the user's selection. Waiting for release closes that race.
+#[cfg(target_os = "windows")]
+fn wait_for_modifiers_release(timeout: Duration) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    const KEYS: [i32; 5] = [
+        VK_CONTROL as i32,
+        VK_SHIFT as i32,
+        VK_MENU as i32,
+        VK_LWIN as i32,
+        VK_RWIN as i32,
+    ];
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // High-order bit set means the key is currently physically down.
+        let any_down = KEYS
+            .iter()
+            .any(|&vk| (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0);
+        if !any_down || std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(15));
+    }
+}
+
 /// Simulate Cmd/Ctrl+C to copy the current selection.
 /// Returns (selected_text, previous_clipboard_contents).
 pub fn capture_selection() -> Result<(String, String)> {
-    // Release the hotkey modifiers so the source app doesn't see them bleed into the copy.
+    // The hotkey fires on key-press while the user is still physically holding
+    // the modifier(s). Wait for them to let go before we synthesize anything —
+    // if a physical Ctrl-up interleaves with our synthetic Ctrl+C, the `c` is
+    // typed literally and overwrites the user's selection.
+    #[cfg(target_os = "windows")]
+    wait_for_modifiers_release(Duration::from_millis(1000));
+
+    // Belt-and-suspenders: also release the modifiers synthetically so nothing
+    // bleeds into the copy on platforms without the wait above.
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(Key::Shift, Direction::Release)?;
     enigo.key(Key::Control, Direction::Release)?;
@@ -30,11 +71,16 @@ pub fn capture_selection() -> Result<(String, String)> {
         text
     };
 
-    // Simulate Cmd+C (Mac) or Ctrl+C (Windows/Linux).
+    // Simulate Cmd+C (Mac) or Ctrl+C (Windows/Linux). Press the modifier and
+    // give it a beat to register before pressing `c`, so the key is never seen
+    // without its modifier.
     let modifier = copy_paste_mod();
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(modifier, Direction::Press)?;
-    enigo.key(Key::Unicode('c'), Direction::Click)?;
+    thread::sleep(Duration::from_millis(40));
+    enigo.key(Key::Unicode('c'), Direction::Press)?;
+    thread::sleep(Duration::from_millis(20));
+    enigo.key(Key::Unicode('c'), Direction::Release)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
 

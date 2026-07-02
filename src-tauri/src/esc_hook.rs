@@ -1,24 +1,29 @@
 use std::sync::{
-    atomic::{AtomicIsize, AtomicU32, Ordering},
+    atomic::{AtomicU32, Ordering},
     OnceLock,
 };
-// AtomicIsize used for HOOK handle (HHOOK is isize on Windows)
 use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-static HOOK: AtomicIsize = AtomicIsize::new(0);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
-/// Install the Esc hook. The hook is only active while the overlay is visible;
-/// it hides the overlay on any Escape keypress without checking the foreground
-/// window (SetForegroundWindow can silently fail, making HWND comparisons
-/// unreliable for programmatically-shown windows).
+/// Install the Esc hook if it isn't already running. The hook is only active
+/// while the overlay is visible; it hides the overlay on any Escape keypress
+/// without checking the foreground window (SetForegroundWindow can silently
+/// fail, making HWND comparisons unreliable for programmatically-shown windows).
+///
+/// This is idempotent by design: it must be safe to call on every overlay show.
+/// Tearing down and respawning the hook thread on each call previously caused a
+/// race (two threads touching one shared HOOK handle) that could silently
+/// unhook the freshly-installed hook, leaving Escape non-functional.
 pub fn start(app: &AppHandle) {
-    stop();
     let _ = APP.get_or_init(|| app.clone());
+    if HOOK_THREAD_ID.load(Ordering::SeqCst) != 0 {
+        return; // already running
+    }
     std::thread::spawn(run_hook_thread);
 }
 
@@ -34,8 +39,9 @@ fn run_hook_thread() {
     unsafe {
         HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
 
+        // `hook` is a local — only this thread ever unhooks it, so there is no
+        // shared handle for a concurrent start()/stop() to race on.
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), 0, 0);
-        HOOK.store(hook as isize, Ordering::SeqCst);
 
         // Pump messages so the hook callback fires on this thread.
         let mut msg: MSG = std::mem::zeroed();
@@ -44,10 +50,11 @@ fn run_hook_thread() {
             DispatchMessageW(&msg);
         }
 
-        // WM_QUIT received — uninstall hook and exit.
-        let h = HOOK.swap(0, Ordering::SeqCst);
-        if h != 0 {
-            UnhookWindowsHookEx(h as HHOOK);
+        // WM_QUIT received — uninstall hook and exit. HOOK_THREAD_ID was
+        // already zeroed by stop() before it posted WM_QUIT, so it's not
+        // touched here (a fast restart may have already stored a newer tid).
+        if hook != 0 {
+            UnhookWindowsHookEx(hook);
         }
     }
 }
