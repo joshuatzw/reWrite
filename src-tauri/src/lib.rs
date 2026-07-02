@@ -5,7 +5,7 @@ use std::sync::{
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Listener, Manager, PhysicalPosition,
 };
 
 pub mod auth;
@@ -32,19 +32,15 @@ pub struct AppState {
 
 // ── Window helpers ────────────────────────────────────────────────────────────
 
-fn focus_existing(app: &AppHandle, label: &str) -> bool {
-    if let Some(w) = app.get_webview_window(label) {
+pub fn show_overlay(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        // Re-center in case the window is still parked off-screen from the
+        // startup webview-warming pass (see the "Warm the overlay" block).
+        let _ = w.center();
         let _ = w.show();
         let _ = w.set_focus();
         #[cfg(target_os = "windows")]
         esc_hook::start(app);
-        return true;
-    }
-    false
-}
-
-pub fn show_overlay(app: &AppHandle) {
-    if focus_existing(app, "overlay") {
         return;
     }
     let _ = tauri::WebviewWindowBuilder::new(app, "overlay", tauri::WebviewUrl::App("".into()))
@@ -561,6 +557,31 @@ pub fn run() {
                         esc_hook::stop();
                     }
                 });
+
+                // ── Warm the overlay's webview ────────────────────────────
+                // A window built hidden keeps its WebView2 content cold: the
+                // engine defers loading the page until the window is first
+                // shown. That made the very first overlay show race the cold
+                // start — the native window was up (so Alt+F4 closed it) but
+                // React and the Tauri IPC weren't live yet, so Esc and the X
+                // button did nothing until a later show warmed it. Park the
+                // window far off-screen and show it to force the webview to
+                // load and mount React; React emits "overlay:ready", at which
+                // point we hide it again. The next real show re-centers (see
+                // show_overlay), so the off-screen parking stays invisible.
+                let _ = overlay.set_position(PhysicalPosition::new(-32000, -32000));
+                let warm_hide = overlay.clone();
+                overlay.once("overlay:ready", move |_| {
+                    let _ = warm_hide.hide();
+                });
+                // Safety net: if "overlay:ready" never arrives, don't leave the
+                // window parked-and-shown off-screen forever.
+                let warm_fallback = overlay.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let _ = warm_fallback.hide();
+                });
+                let _ = overlay.show();
             }
 
             // ── Pre-warm processing indicator ─────────────────────────────────
@@ -654,6 +675,7 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::open_settings,
+            commands::close_overlay,
             commands::update_hotkey,
             commands::update_super_hotkey,
             commands::set_default_skill,

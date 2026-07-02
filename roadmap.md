@@ -190,16 +190,14 @@ CHECKOUT_CANCEL_URL  = https://yoursite.com/checkout/cancel
 | Login method | Magic link only / Google OAuth / both | Magic link (simplest) |
 | 402 UX | Inline overlay error / separate modal window | Inline overlay error (see Phase 3, still needs the "upgrade" messaging) |
 
-**BUGS:**
 
-1. Trial Conversion:
-Overlay "renew to Pro or Max plans" link — opening Settings from the overlay is broken:
-- When a free user hits the limit in the main overlay and clicks the "renew to Pro or Max plans" link, the overlay floating window is NOT dismissed — it stays on screen.
-- The Settings window DOES open behind the overlay, but it renders blank / shows nothing (appears to hang; no content ever paints).
-- Attempted fix (hide overlay first, then fire `open_settings` without awaiting; `set_focus()` on the built Settings window in `show_settings`) did NOT change the behaviour — symptoms are identical.
-- Repro: free account with trial exhausted → trigger rewrite in overlay → limit message appears → click the link.
-- Affected code: `src/pages/Overlay.tsx` (link onClick), `src-tauri/src/lib.rs` `show_settings` / `open_settings` command, `src/pages/Settings.tsx` (blank render).
-- Needs investigation: why the overlay `getCurrentWindow().hide()` doesn't take effect, and why the Settings webview mounts but never renders content when opened via this path (vs. opening Settings from the tray, which works).
+**NEW FEATURES**
+1. Context Menu 
+- Context menu: Ctrl + i = reads a chunk of text and understands what you want to reply to / frame. It will not rewrite/synthesize that text, it will just store it in memory so it knows how to respond. 
+
+2. Second Brain? 
+
+**BUGS:**
 
 
 2. Esc function
@@ -207,3 +205,6 @@ Overlay "renew to Pro or Max plans" link — opening Settings from the overlay i
 - If my focus is on the skill selector window, it will refuse to close when I press Esc
 - Once I click outside/away from the skill selector window, the ESc function works. 
 - Needs investigation and fixing. 
+- [new] I asked agent to investigate trial overlay closing behaviour and apply what it can to this behaviour 
+
+
