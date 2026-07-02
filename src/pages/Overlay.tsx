@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import type { SkillsConfig } from "../types";
 import { BUILTIN_SKILLS } from "../skills";
 
@@ -60,14 +60,16 @@ export default function Overlay() {
   }, []);
 
   // Single close path used by the X button, the Esc key, and the global Esc
-  // hook (via the "overlay:esc" event). Hiding through this JS call runs the
-  // hide IPC on the window's owning main thread, which works even when the
-  // overlay is the focused foreground window — unlike a hide issued directly
-  // from the low-level keyboard-hook thread.
+  // hook (via the "overlay:esc" event). The actual hide is delegated to the
+  // `close_overlay` Rust command, which runs `overlay.hide()` on the main
+  // event-loop thread — the same mechanism the "renew" link uses via
+  // `open_settings`. A `hide()` issued straight from JS is silently ignored by
+  // Windows when the overlay is the focused foreground window, which is why Esc
+  // and the X button previously did nothing.
   const closeOverlay = useCallback(() => {
     cancelledRef.current = true;
     setStatus("idle");
-    getCurrentWindow().hide();
+    invoke("close_overlay").catch(() => {});
   }, [setStatus]);
 
   const refreshData = useCallback(async () => {
@@ -79,6 +81,14 @@ export default function Overlay() {
     const list = buildItems(cfg);
     setItems(list);
     itemsRef.current = list;
+  }, []);
+
+  // Tell the Rust side the overlay's webview has finished mounting. At startup
+  // the window is warmed off-screen; once this fires, Rust hides it again so the
+  // first real show is already interactive (see the "warm the overlay" block in
+  // lib.rs). Emitting on every mount is harmless — Rust only listens once.
+  useEffect(() => {
+    emit("overlay:ready");
   }, []);
 
   useEffect(() => {

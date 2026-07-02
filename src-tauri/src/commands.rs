@@ -143,6 +143,25 @@ pub fn save_config(
 }
 
 #[tauri::command]
+pub fn close_overlay(app: AppHandle) {
+    // Mirror the reliable dismissal used by `open_settings`: marshal the hide
+    // onto the main event-loop thread. A `hide()` issued from JS (or the
+    // low-level Esc hook thread) is silently ignored by Windows when the overlay
+    // is the focused foreground window, so Esc / the X button appeared dead.
+    // Running the hide here — the same thread `open_settings` uses — dismisses
+    // the overlay regardless of focus. We also tear down the Esc hook, since it
+    // should only be armed while the overlay is visible.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(overlay) = handle.get_webview_window("overlay") {
+            let _ = overlay.hide();
+        }
+        #[cfg(target_os = "windows")]
+        crate::esc_hook::stop();
+    });
+}
+
+#[tauri::command]
 pub fn open_settings(app: AppHandle) {
     // Marshal the whole sequence onto the main event-loop thread — every
     // window operation here must run there. We dismiss the overlay and tear
