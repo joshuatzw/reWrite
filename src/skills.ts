@@ -8,21 +8,21 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
   {
     id: "__proofread__",
     name: "Proofread",
-    description: "Fix spelling and grammar while preserving your tone and voice.",
+    description: "Fixes grammar, spelling, and punctuation before you send. Retains your writing style as is.",
   },
   {
-    id: "__formal_email__",
-    name: "Formal Email",
-    description: "Rewrite as a polished, professional business email.",
+    id: "__polish__",
+    name: "Polish",
+    description: "Refines your text so it's ready for a third party to review — professional and considered.",
   },
   {
     id: "__summarise__",
     name: "Summarise",
-    description: "Condense the text into concise bullet points.",
+    description: "Condenses a long thought or chunk, elevating the best bits so your message gets across.",
   },
   {
-    id: "__shorten__",
-    name: "Shorten",
-    description: "Shorten the text while preserving its full meaning.",
+    id: "__enhance__",
+    name: "Enhance",
+    description: "Writing feels too thin? Beefs up your email, proposal, or summary so it's polished and ready to go.",
   },
 ];

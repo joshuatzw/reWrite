@@ -192,21 +192,6 @@ CHECKOUT_CANCEL_URL  = https://yoursite.com/checkout/cancel
 
 
 **NEW FEATURES**
-1. Writing Style 
-Introduce a Tone of Voice feature that's created with every account. (it is however only accessible to Pro plans and above)
-In main menu, it sits below skills and above settings in the side bar (greyed out if user is free.)
-What this does is a repository of md files that cover the writing style of the user. These are manually edited and/uploaded by the user.
-You can add a new tone of voice and name it e.g. formal.md / brand_voice.md 
-
-Editing the tone of Voice:
-
-
-Where this works:
-When creating a new skill, instead of building on an existing skill, instead reference the tone of voice (dropdown menu to select which tone of voice exists)
-
-When submitting prompts, the AI must take into account the tone of voice preferred. 
-*Note: there could be multiple in one tone of voice: e.g. formal, casual, could all be in one. So it is still important to understand the language of the higlighted phrase / instruction and rewrite the text accordingly. 
-
 
 2. Default Skills Change:
 Proofread -- Proofreads and fixes grammatical errors, spellings before you send them out. Retains your writing style as is. 
@@ -249,9 +234,7 @@ Here is
 
 
 **BUGS:**
-I'm not happy with the default features. Let's change them to:
 
 
 **Security and Abuse**
-- Server Security - since everyone has access to the supabase public key, i need to ensure that RLS is enabled for supabase to ensure no one changes their subscription status on their own
-- 
+

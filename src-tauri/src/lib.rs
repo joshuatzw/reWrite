@@ -20,6 +20,31 @@ pub mod skills;
 #[cfg(target_os = "windows")]
 pub mod esc_hook;
 
+// ── Temporary diagnostics (overlay first-open hang) ─────────────────────────
+// Timestamped, thread-tagged tracing to pinpoint where the main event loop
+// stalls on the first couple of overlay opens. Remove once the hang is fixed.
+use std::sync::OnceLock;
+static TRACE_START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Latched true the moment the user genuinely opens the overlay. The startup
+/// webview-warming pass shows the overlay off-screen and then hides it again —
+/// once via an `overlay:ready` listener, once via a 5s fallback timer. On a cold
+/// webview `overlay:ready` can arrive *seconds after* the first real open (12.6s
+/// in one trace), so those hides would fire while the user is looking at the
+/// overlay and yank it away — which is exactly the "overlay crashes on the first
+/// opens after launch" symptom. Both warm-pass hides check this first and skip
+/// once a real open has happened. See `show_overlay` and the warm block.
+static OVERLAY_OPENED: AtomicBool = AtomicBool::new(false);
+pub fn trace(where_: &str) {
+    let t0 = TRACE_START.get_or_init(std::time::Instant::now);
+    eprintln!(
+        "[trace +{:>8.3}s tid={:?}] {}",
+        t0.elapsed().as_secs_f64(),
+        std::thread::current().id(),
+        where_
+    );
+}
+
 pub struct AppState {
     pub captured_text: Mutex<Option<String>>,
     pub original_clipboard: Mutex<Option<String>>,
@@ -44,26 +69,46 @@ pub struct AppState {
 // ── Window helpers ────────────────────────────────────────────────────────────
 
 pub fn show_overlay(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        // Re-center in case the window is still parked off-screen from the
-        // startup webview-warming pass (see the "Warm the overlay" block).
-        let _ = w.center();
-        let _ = w.show();
-        let _ = w.set_focus();
-        #[cfg(target_os = "windows")]
-        esc_hook::start(app);
-        return;
-    }
-    let _ = tauri::WebviewWindowBuilder::new(app, "overlay", tauri::WebviewUrl::App("".into()))
-        .title("")
-        .decorations(false)
-        .always_on_top(true)
-        .transparent(true)
-        .skip_taskbar(true)
-        .inner_size(480.0, 430.0)
-        .center()
-        .focused(true)
-        .build();
+    // This is called from `on_hotkey`'s spawned async task — i.e. off the main
+    // event-loop thread. Win32/WebView2 windows are thread-affine: show/focus/
+    // move must run on the thread that owns the window (the main thread). Issuing
+    // them from the tokio worker thread is undefined behaviour and crashed the
+    // first couple of opens after launch, while the WebView2 controller was
+    // still settling from the startup warm pass. Marshal onto the main thread —
+    // the same rule `close_overlay` / `open_settings` already follow.
+    trace("show_overlay: enter (pre run_on_main_thread)");
+    // A real open supersedes the startup warm pass: from here on, the warm-pass
+    // hides must not fire (they'd yank the overlay out from under the user).
+    OVERLAY_OPENED.store(true, Ordering::SeqCst);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        trace("show_overlay: on main thread");
+        if let Some(w) = handle.get_webview_window("overlay") {
+            // Re-center in case the window is still parked off-screen from the
+            // startup webview-warming pass (see the "Warm the overlay" block).
+            trace("show_overlay: center start");
+            let _ = w.center();
+            trace("show_overlay: show start");
+            let _ = w.show();
+            trace("show_overlay: set_focus start");
+            let _ = w.set_focus();
+            trace("show_overlay: window ops done");
+            #[cfg(target_os = "windows")]
+            esc_hook::start(&handle);
+            trace("show_overlay: esc_hook::start done");
+            return;
+        }
+        let _ = tauri::WebviewWindowBuilder::new(&handle, "overlay", tauri::WebviewUrl::App("".into()))
+            .title("")
+            .decorations(false)
+            .always_on_top(true)
+            .transparent(true)
+            .skip_taskbar(true)
+            .inner_size(480.0, 430.0)
+            .center()
+            .focused(true)
+            .build();
+    });
 }
 
 pub fn show_processing(app: &AppHandle) {
@@ -271,21 +316,27 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 // ── Hotkey handlers ───────────────────────────────────────────────────────────
 
 fn on_hotkey(app: &AppHandle) {
+    trace("on_hotkey: enter");
     let Some(state) = app.try_state::<AppState>() else { return };
 
     // Sample the foreground app now, while the target still has focus — before
     // the overlay steals it — so we know whether to emit HTML or plain text.
+    trace("on_hotkey: foreground::detect start");
     if let Ok(mut fmt) = state.foreground_format.lock() {
         *fmt = foreground::detect();
     }
+    trace("on_hotkey: foreground::detect done");
 
     if state.is_capturing.swap(true, Ordering::SeqCst) {
+        trace("on_hotkey: already capturing, bail");
         return;
     }
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        trace("on_hotkey: capture_selection start");
         let result = tokio::task::spawn_blocking(clipboard::capture_selection).await;
+        trace("on_hotkey: capture_selection done");
 
         if let Some(s) = app.try_state::<AppState>() {
             s.is_capturing.store(false, Ordering::SeqCst);
@@ -692,16 +743,30 @@ pub fn run() {
                 let _ = overlay.set_position(PhysicalPosition::new(-32000, -32000));
                 let warm_hide = overlay.clone();
                 overlay.once("overlay:ready", move |_| {
+                    if OVERLAY_OPENED.load(Ordering::SeqCst) {
+                        trace("warm: overlay:ready but overlay already opened -> skip hide");
+                        return;
+                    }
+                    trace("warm: overlay:ready received -> hide");
                     let _ = warm_hide.hide();
+                    trace("warm: overlay:ready hide done");
                 });
                 // Safety net: if "overlay:ready" never arrives, don't leave the
                 // window parked-and-shown off-screen forever.
                 let warm_fallback = overlay.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if OVERLAY_OPENED.load(Ordering::SeqCst) {
+                        trace("warm: 5s fallback but overlay already opened -> skip hide");
+                        return;
+                    }
+                    trace("warm: 5s fallback -> hide");
                     let _ = warm_fallback.hide();
+                    trace("warm: 5s fallback hide done");
                 });
+                trace("warm: overlay.show() (off-screen) start");
                 let _ = overlay.show();
+                trace("warm: overlay.show() (off-screen) done");
             }
 
             // ── Pre-warm processing indicator ─────────────────────────────────
