@@ -35,15 +35,14 @@ CI is ~a day. A *shippable, signed, working* macOS build is a small porting proj
 - [x] Billing noted: repo stays **private** for security → macOS runners bill at **10x minutes**.
 
 ### Phase 1 — Make it compile on macOS
-- [ ] **Fix `secure_store.rs`** — the hard blocker. Either:
-  - gate the DPAPI impl with `#[cfg(target_os = "windows")]` + add a macOS impl
-    (Keychain via `security-framework`), **or**
-  - add a cross-platform fallback (plaintext or simple file-based) behind the same
-    `encrypt`/`decrypt` signature so callers don't change.
-- [ ] Audit every other bare `windows_sys` use for a gate (`esc_hook.rs` done; double-check
-      `commands.rs:180/197`, `lib.rs:96/727`).
-- [ ] Get a green `cargo check --target aarch64-apple-darwin` — do this in CI first (Phase 3)
-      since there's no Mac locally.
+- [x] **Fixed `secure_store.rs`** — cfg-gated impls behind unchanged `encrypt`/`decrypt`:
+      Windows = DPAPI (unchanged); macOS = **AES-256-GCM with a per-install key in the login
+      Keychain** (keyring `apple-native` + aes-gcm + rand); other = passthrough (dev/CI).
+- [x] **Fixed `lib.rs` `transparent` errors** (105/126/714/782) — enabled tauri `macos-private-api`
+      feature in `Cargo.toml` + `"macOSPrivateApi": true` in `tauri.conf.json`.
+      NOTE: bars Mac App Store submission (fine for Developer ID distribution).
+- [x] Windows `cargo check` still green locally after the refactor (58s).
+- [ ] Get a green `cargo check` for both arches in CI (PR #1) — validates the macOS-only code.
 
 ### Phase 2 — Make it actually work at runtime (verify on real macOS)
 - [ ] **Verify `foreground.rs` macOS path** (NSWorkspace/objc2) — currently unverified.
