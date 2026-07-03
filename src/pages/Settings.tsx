@@ -250,7 +250,7 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
             </div>
             <div style={{ fontSize: 17, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>Check your email</div>
             <div style={{ fontSize: 14, color: "#74777e", lineHeight: 1.5 }}>
-              We sent a magic link to <strong>{email}</strong>.<br />Click it to sign in — this window will update automatically.
+              We sent a magic link to <strong>{email}</strong>.<br />Click it to sign in, and this window will update automatically.
             </div>
             <button onClick={() => { setSent(false); setEmail(""); }} style={{ marginTop: 22, fontSize: 13.5, color: "#86898f", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
               Use a different email
@@ -435,14 +435,14 @@ function HomeView({ history, skillsConfig, config, authState }: { history: Histo
         {/* Video placeholder */}
         <div style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 16, padding: "14px 14px 22px", display: "flex", flexDirection: "column" }}>
           <div style={{ position: "relative", width: "100%", height: 208, borderRadius: 11, overflow: "hidden", background: "repeating-linear-gradient(135deg,#eef0f2 0 13px,#e7e9ec 13px 26px)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ position: "absolute", top: 12, left: 14, fontFamily: "monospace", fontSize: 11, letterSpacing: .5, color: "#aeb1b7" }}>intro video — 0:48</span>
+            <span style={{ position: "absolute", top: 12, left: 14, fontFamily: "monospace", fontSize: 11, letterSpacing: .5, color: "#aeb1b7" }}>intro video · 0:48</span>
             <div style={{ width: 60, height: 60, borderRadius: "50%", background: "rgba(22,22,26,.92)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 18px rgba(20,20,26,.25)" }}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="#fff"><path d="M8 5.5v13l11-6.5z" /></svg>
             </div>
           </div>
           <div style={{ padding: "18px 14px 2px" }}>
             <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "#16161a" }}>Introducing reWrite</h3>
-            <p style={{ fontSize: 14.5, color: "#74777e", marginTop: 6, lineHeight: 1.45 }}>Your daily tasks, made easier — every word in your voice.</p>
+            <p style={{ fontSize: 14.5, color: "#74777e", marginTop: 6, lineHeight: 1.45 }}>Your daily tasks, made easier, every word in your voice.</p>
           </div>
         </div>
       </div>
@@ -862,7 +862,7 @@ function ToneLockedView() {
         </div>
         <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 28, color: "#16161a", marginBottom: 8 }}>Writing Style is a Pro feature</h1>
         <p style={{ fontSize: 14.5, color: "#74777e", maxWidth: 400, marginBottom: 26, lineHeight: 1.5 }}>
-          Craft reusable tone-of-voice profiles — a formal register, your brand voice, a casual Slack tone — and apply them to any skill. Available on Pro and Max plans.
+          Craft reusable tone-of-voice profiles (a formal register, your brand voice, a casual Slack tone) and apply them to any skill. Available on Pro and Max plans.
         </p>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Pro</button>
@@ -1108,7 +1108,7 @@ function ToneOfVoiceView() {
               {error && <div style={{ fontSize: 12.5, color: "#c0392b", marginTop: 10 }}>{error}</div>}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 16, flexShrink: 0 }}>
                 <div style={{ fontSize: 12.5, color: "#9a9da3" }}>
-                  {creating ? "New tone of voice — unsaved" : dirty ? "Unsaved changes" : "All changes saved"}
+                  {creating ? "New tone of voice (unsaved)" : dirty ? "Unsaved changes" : "All changes saved"}
                 </div>
                 <button
                   onClick={handleSave}
@@ -1126,7 +1126,7 @@ function ToneOfVoiceView() {
               </div>
               <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>No tone of voice selected</div>
               <p style={{ fontSize: 14.5, color: "#74777e", maxWidth: 360, lineHeight: 1.5, marginBottom: 22 }}>
-                Create a tone of voice — like <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>formal.md</code> or <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>brand_voice.md</code> — and apply it to any skill.
+                Create a tone of voice, like <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>formal.md</code> or <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>brand_voice.md</code>, and apply it to any skill.
               </p>
               <button onClick={startNew} style={{ fontSize: 14, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 11, padding: "11px 22px", cursor: "pointer", fontFamily: "inherit" }}>Create your first tone</button>
             </div>
@@ -1358,7 +1358,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           {editingSuperHotkey ? (
             <div style={{ padding: "18px 0", borderBottom: "1px solid #f0f1f3" }}>
               <div style={{ fontSize: 15, fontWeight: 600, color: "#1f2026", marginBottom: 4 }}>Super hotkey</div>
-              <div style={{ fontSize: 13, color: "#86898f", marginBottom: 10 }}>Instantly applies the default skill — no overlay shown.</div>
+              <div style={{ fontSize: 13, color: "#86898f", marginBottom: 10 }}>Instantly applies the default skill, no overlay shown.</div>
               <form onSubmit={handleSaveSuperHotkey} style={{ display: "flex", gap: 8 }}>
                 <input ref={newSuperHotkeyRef} value={newSuperHotkey} onChange={(e) => setNewSuperHotkey(e.target.value)} placeholder={superHotkey} style={{ flex: 1, border: "1px solid #e0e1e4", borderRadius: 9, padding: "10px 13px", fontSize: 14, color: "#16161a", outline: "none", fontFamily: "monospace" }} />
                 <button type="submit" disabled={!newSuperHotkey.trim() || superHotkeySaving} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 16px", cursor: "pointer", fontFamily: "inherit" }}>{superHotkeySaving ? "…" : "Save"}</button>
@@ -1370,7 +1370,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           ) : (
             <PrefRow
               label="Super hotkey"
-              sub="Instantly applies your default skill — no overlay"
+              sub="Instantly applies your default skill, no overlay"
               right={
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   {hotkeyParts(superHotkey).map((k, i) => (
@@ -1411,12 +1411,12 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
             title={updateStatus === "error" ? updateError ?? undefined : undefined}
           >
             reWrite {appVersion}
-            {updateStatus === "idle" && " — check for updates any time."}
-            {updateStatus === "checking" && " — checking for updates…"}
-            {updateStatus === "up-to-date" && " — you're up to date."}
-            {updateStatus === "downloading" && " — downloading update…"}
-            {updateStatus === "ready" && " — restarting…"}
-            {updateStatus === "error" && " — couldn't check for updates."}
+            {updateStatus === "idle" && ". Check for updates any time."}
+            {updateStatus === "checking" && ". Checking for updates…"}
+            {updateStatus === "up-to-date" && ". You're up to date."}
+            {updateStatus === "downloading" && ". Downloading update…"}
+            {updateStatus === "ready" && ". Restarting…"}
+            {updateStatus === "error" && ". Couldn't check for updates."}
           </div>
           <button
             onClick={handleCheckForUpdates}

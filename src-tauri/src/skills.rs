@@ -1,5 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::foreground::OutputFormat;
 use std::{
     collections::HashMap,
     fs,
@@ -86,16 +88,16 @@ Preserve line breaks, formatting, and paragraph structure exactly as given.
 [IMPORTANT] Return only the corrected text, with no explanation or commentary."#),
         "__polish__" => Some(r#"Rewrite the text below so it is ready to be shared with a third party (e.g. a colleague, client, or manager) for review.
 Fix any grammar or clarity issues, tighten loose phrasing, and adjust tone so it reads as professional and considered.
-Keep the length roughly the same — do not summarize or expand significantly.
+Keep the length roughly the same; do not summarize or expand significantly.
 Preserve the core meaning, intent, and key details exactly. Do not add new claims, arguments, or information.
 [IMPORTANT] Return only the rewritten text, with no explanation or commentary."#),
         "__summarise__" => Some(r#"Summarize the text below, keeping only the most important points, decisions, or asks.
-Preserve the original intent and any critical details (numbers, names, deadlines, action items) — do not lose information that changes the meaning.
+Preserve the original intent and any critical details (numbers, names, deadlines, action items); do not lose information that changes the meaning.
 Write in clear, complete sentences (not just fragments or bullet-only unless the input is already a list).
 Aim for roughly 30-50% of the original length, adjusting based on how much can be safely cut.
 [IMPORTANT] Return only the summary, with no explanation or commentary."#),
         "__enhance__" => Some(r#"The text below feels thin or underdeveloped. Rewrite it to be more substantial and persuasive, suitable for a polished email, proposal, or executive summary.
-Add depth by strengthening weak statements, making vague points more concrete, and improving the logical flow between ideas — but do not invent specific facts, numbers, or claims that aren't implied by the original.
+Add depth by strengthening weak statements, making vague points more concrete, and improving the logical flow between ideas, but do not invent specific facts, numbers, or claims that aren't implied by the original.
 Elevate the language and structure so it reads as complete and ready to send, without becoming bloated or repetitive.
 [IMPORTANT] Return only the rewritten text, with no explanation or commentary."#),
         _ => None,
@@ -143,6 +145,7 @@ pub fn build_system_prompt(
     config: &SkillsConfig,
     skill_id: Option<&str>,
     tone: Option<&str>,
+    format: OutputFormat,
 ) -> String {
     let global = config.global_instructions.trim();
     let skill_instr = skill_id
@@ -152,18 +155,19 @@ pub fn build_system_prompt(
     let combined = match (global.is_empty(), skill_instr.is_empty()) {
         (true, true) => {
             let base = "Rewrite the following text to improve clarity and flow.".to_string();
-            return append_tone_and_close(base, tone);
+            return append_tone_and_close(base, tone, format);
         }
         (false, true) => global.to_string(),
         (true, false) => skill_instr,
         (false, false) => format!("{global}\n\n{skill_instr}"),
     };
 
-    append_tone_and_close(combined, tone)
+    append_tone_and_close(combined, tone, format)
 }
 
-/// Append the optional tone block, then the trailing "Return only..." line.
-fn append_tone_and_close(mut prompt: String, tone: Option<&str>) -> String {
+/// Append the optional tone block, the output-format instructions, then the
+/// trailing "Return only..." line.
+fn append_tone_and_close(mut prompt: String, tone: Option<&str>, format: OutputFormat) -> String {
     if let Some(tone) = tone {
         let tone = tone.trim();
         if !tone.is_empty() {
@@ -171,6 +175,14 @@ fn append_tone_and_close(mut prompt: String, tone: Option<&str>) -> String {
                 "\n\nApply the following tone of voice / writing style to your output. Match its language, phrasing, and register while still following the instructions above and preserving the original meaning:\n\"\"\"\n{tone}\n\"\"\""
             ));
         }
+    }
+    match format {
+        OutputFormat::Html => prompt.push_str(
+            "\n\nFormat your output as semantic inline HTML suitable for pasting directly into a rich-text email or document composer. Use <p> for paragraphs, <strong> or <em> for emphasis, and <ul>/<ol> with <li> for lists. Apply bold and lists ONLY where the content's structure naturally calls for it — never impose structure on text that should stay as written (for example, straightforward proofreading). Do not use Markdown, do not wrap the output in code fences, and do not include <html>, <head>, or <body> tags.",
+        ),
+        OutputFormat::PlainText => prompt.push_str(
+            "\n\nReturn plain text only. Do not use Markdown, HTML tags, or any other markup.",
+        ),
     }
     prompt.push_str("\nReturn only the result, without any explanation or preamble.");
     prompt

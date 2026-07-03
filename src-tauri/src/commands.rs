@@ -55,17 +55,27 @@ pub async fn paste_text(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let (original, paste_delay_ms, restore, restore_delay_ms) = {
+    let (original, paste_delay_ms, restore, restore_delay_ms, format) = {
         let original = lock(&state.original_clipboard)?.clone().unwrap_or_default();
+        let format = *lock(&state.foreground_format)?;
         let cfg = lock(&state.config)?;
-        (original, cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
+        (original, cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms, format)
     };
 
     window.hide().map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
 
-    tokio::task::spawn_blocking(move || {
-        crate::clipboard::paste_and_restore(&result, &original, restore, restore_delay_ms)
+    tokio::task::spawn_blocking(move || match format {
+        crate::foreground::OutputFormat::Html => crate::clipboard::paste_html_and_restore(
+            &result,
+            &crate::clipboard::strip_html_tags(&result),
+            &original,
+            restore,
+            restore_delay_ms,
+        ),
+        crate::foreground::OutputFormat::PlainText => {
+            crate::clipboard::paste_and_restore(&result, &original, restore, restore_delay_ms)
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -95,6 +105,7 @@ pub async fn rewrite_with_skill(
     };
     let skills_config = lock(&state.skills_config)?.clone();
     let tones = lock(&state.tones)?.clone();
+    let format = *lock(&state.foreground_format)?;
     let client = state.http_client.clone();
 
     let tone = crate::skills::resolve_tone_content(&skills_config, &tones, &effective_skill_id);
@@ -102,6 +113,7 @@ pub async fn rewrite_with_skill(
         &skills_config,
         Some(&effective_skill_id),
         tone.as_deref(),
+        format,
     );
     let user_message = format!("<text>\n{text}\n</text>");
 
@@ -109,7 +121,14 @@ pub async fn rewrite_with_skill(
         .await
         .map_err(|e| e.to_string())?;
 
-    log_history(&app, &state, &effective_skill_id, &text, &result.text);
+    // History stores a plain-text rendering; HTML output is only for the paste.
+    let logged = match format {
+        crate::foreground::OutputFormat::Html => {
+            crate::clipboard::strip_html_tags(&result.text)
+        }
+        crate::foreground::OutputFormat::PlainText => result.text.clone(),
+    };
+    log_history(&app, &state, &effective_skill_id, &text, &logged);
 
     // Keep the local usage cache in step with the server-side count so the
     // Settings "rewrites used this month" figure updates without a full re-sync.

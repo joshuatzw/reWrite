@@ -13,7 +13,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
   {
     id: "__polish__",
     name: "Polish",
-    description: "Refine your text to read as professional and considered — ready for a third party.",
+    description: "Refine your text to read as professional and considered, ready for a third party.",
   },
   {
     id: "__summarise__",

@@ -116,3 +116,131 @@ pub fn paste_and_restore(
 
     Ok(())
 }
+
+/// Like `paste_and_restore`, but writes rich HTML to the clipboard (with a
+/// plain-text fallback for apps that only read plain text), then pastes it.
+/// arboard maps this to CF_HTML on Windows and `public.html` on macOS.
+pub fn paste_html_and_restore(
+    html: &str,
+    plain_fallback: &str,
+    original: &str,
+    restore: bool,
+    restore_delay_ms: u64,
+) -> Result<()> {
+    Clipboard::new()?.set().html(html, Some(plain_fallback))?;
+
+    thread::sleep(Duration::from_millis(50));
+
+    let modifier = copy_paste_mod();
+    let mut enigo = Enigo::new(&Settings::default())?;
+    enigo.key(modifier, Direction::Press)?;
+    enigo.key(Key::Unicode('v'), Direction::Click)?;
+    enigo.key(modifier, Direction::Release)?;
+    drop(enigo);
+
+    if restore && !original.is_empty() {
+        thread::sleep(Duration::from_millis(restore_delay_ms));
+        let _ = Clipboard::new()?.set_text(original);
+    }
+
+    Ok(())
+}
+
+/// Produce a readable plain-text rendering of HTML output — used as the
+/// clipboard's plain-text fallback and for history/word-count. Block-level
+/// closes and `<br>` become newlines, remaining tags are dropped, common
+/// entities are decoded, and runs of blank lines are collapsed.
+pub fn strip_html_tags(html: &str) -> String {
+    // Turn block boundaries into newlines before removing tags.
+    let mut s = html
+        .replace("</p>", "\n")
+        .replace("</li>", "\n")
+        .replace("</ul>", "\n")
+        .replace("</ol>", "\n")
+        .replace("</div>", "\n")
+        .replace("</h1>", "\n")
+        .replace("</h2>", "\n")
+        .replace("</h3>", "\n");
+    for br in ["<br>", "<br/>", "<br />"] {
+        s = s.replace(br, "\n");
+    }
+
+    // Drop every remaining tag.
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+
+    // Decode the handful of entities we're likely to emit. `&amp;` last so an
+    // already-decoded `&` isn't produced mid-stream and re-decoded.
+    out = out
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+
+    // Collapse 3+ newlines to a paragraph break and trim surrounding blanks.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut newline_run = 0;
+    for c in out.chars() {
+        if c == '\n' {
+            newline_run += 1;
+            if newline_run <= 2 {
+                collapsed.push(c);
+            }
+        } else {
+            newline_run = 0;
+            collapsed.push(c);
+        }
+    }
+    collapsed.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_html_tags;
+
+    #[test]
+    fn paragraphs_become_blank_line_separated() {
+        assert_eq!(
+            strip_html_tags("<p>Hello there.</p><p>Second para.</p>"),
+            "Hello there.\nSecond para."
+        );
+    }
+
+    #[test]
+    fn list_items_become_lines() {
+        assert_eq!(
+            strip_html_tags("<ul><li>One</li><li>Two</li></ul>"),
+            "One\nTwo"
+        );
+    }
+
+    #[test]
+    fn inline_tags_are_dropped_text_kept() {
+        assert_eq!(
+            strip_html_tags("A <strong>bold</strong> and <em>italic</em> word"),
+            "A bold and italic word"
+        );
+    }
+
+    #[test]
+    fn entities_are_decoded() {
+        assert_eq!(
+            strip_html_tags("<p>Tom &amp; Jerry said &quot;hi&quot; &lt;3</p>"),
+            "Tom & Jerry said \"hi\" <3"
+        );
+    }
+
+    #[test]
+    fn br_becomes_newline() {
+        assert_eq!(strip_html_tags("line one<br>line two"), "line one\nline two");
+    }
+}

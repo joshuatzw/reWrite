@@ -12,6 +12,7 @@ pub mod auth;
 pub mod clipboard;
 pub mod commands;
 pub mod config;
+pub mod foreground;
 pub mod history;
 pub mod rewrite;
 pub mod secure_store;
@@ -23,6 +24,10 @@ pub mod esc_hook;
 pub struct AppState {
     pub captured_text: Mutex<Option<String>>,
     pub original_clipboard: Mutex<Option<String>>,
+    /// Output format chosen from the foreground app at capture time (HTML for
+    /// rich-text targets like Outlook/Gmail, plain text otherwise). Sampled
+    /// before any of our own windows steal foreground.
+    pub foreground_format: Mutex<foreground::OutputFormat>,
     pub config: Mutex<config::Config>,
     pub skills_config: Mutex<skills::SkillsConfig>,
     pub history: Mutex<history::HistoryStore>,
@@ -168,7 +173,7 @@ pub fn show_settings(app: &AppHandle) {
         return;
     }
     if let Ok(w) = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
-        .title("reWrite — Settings")
+        .title("reWrite - Settings")
         .decorations(true)
         .always_on_top(false)
         .inner_size(1260.0, 870.0)
@@ -273,6 +278,13 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
 fn on_hotkey(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
+
+    // Sample the foreground app now, while the target still has focus — before
+    // the overlay steals it — so we know whether to emit HTML or plain text.
+    if let Ok(mut fmt) = state.foreground_format.lock() {
+        *fmt = foreground::detect();
+    }
+
     if state.is_capturing.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -332,6 +344,14 @@ fn on_super_hotkey(app: &AppHandle) {
         return;
     }
 
+    // Sample the foreground app now — after the guards (so a dropped duplicate
+    // press can't overwrite the in-flight rewrite's format) but before
+    // `show_processing` below steals focus, so the decision reflects the user's
+    // real target app.
+    if let Ok(mut fmt) = state.foreground_format.lock() {
+        *fmt = foreground::detect();
+    }
+
     show_processing(app);
 
     let app = app.clone();
@@ -374,6 +394,12 @@ fn on_super_hotkey(app: &AppHandle) {
             (cfg.model.clone(), cfg.default_skill_id.clone(), cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
         };
 
+        let format = state
+            .foreground_format
+            .lock()
+            .map(|f| *f)
+            .unwrap_or_default();
+
         let (system, skill_name) = {
             let Ok(sc) = state.skills_config.lock() else {
                 hide_processing(&app);
@@ -384,7 +410,7 @@ fn on_super_hotkey(app: &AppHandle) {
                 Err(_) => None,
             };
             let system =
-                skills::build_system_prompt(&sc, Some(&default_skill_id), tone.as_deref());
+                skills::build_system_prompt(&sc, Some(&default_skill_id), tone.as_deref(), format);
             let name = skills::skill_display_name(&sc, &default_skill_id);
             (system, name)
         };
@@ -405,6 +431,12 @@ fn on_super_hotkey(app: &AppHandle) {
             }
         };
         let output = result.text;
+        // For HTML targets the model returns markup; keep a plain-text form for
+        // the clipboard fallback and for history / word-count.
+        let plain_output = match format {
+            foreground::OutputFormat::Html => clipboard::strip_html_tags(&output),
+            foreground::OutputFormat::PlainText => output.clone(),
+        };
 
         // Keep the local usage cache in step with the server-side count so the
         // Settings usage figure reflects super-hotkey rewrites too.
@@ -422,8 +454,8 @@ fn on_super_hotkey(app: &AppHandle) {
                 skill_id: default_skill_id,
                 skill_name,
                 input_text: text,
-                output_text: output.clone(),
-                output_word_count: history::count_words(&output),
+                output_text: plain_output.clone(),
+                output_word_count: history::count_words(&plain_output),
             };
             if let (Ok(mut h), Ok(path)) = (
                 state.history.lock(),
@@ -435,8 +467,17 @@ fn on_super_hotkey(app: &AppHandle) {
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
-        let _ = tokio::task::spawn_blocking(move || {
-            clipboard::paste_and_restore(&output, &original, restore, restore_delay_ms)
+        let _ = tokio::task::spawn_blocking(move || match format {
+            foreground::OutputFormat::Html => clipboard::paste_html_and_restore(
+                &output,
+                &plain_output,
+                &original,
+                restore,
+                restore_delay_ms,
+            ),
+            foreground::OutputFormat::PlainText => {
+                clipboard::paste_and_restore(&output, &original, restore, restore_delay_ms)
+            }
         })
         .await;
 
@@ -482,6 +523,7 @@ pub fn run() {
         .manage(AppState {
             captured_text: Mutex::new(None),
             original_clipboard: Mutex::new(None),
+            foreground_format: Mutex::new(foreground::OutputFormat::default()),
             config: Mutex::new(config::Config::default()),
             skills_config: Mutex::new(skills::SkillsConfig::default()),
             history: Mutex::new(history::HistoryStore::default()),
@@ -724,7 +766,7 @@ pub fn run() {
                 "settings",
                 tauri::WebviewUrl::App("".into()),
             )
-            .title("reWrite — Settings")
+            .title("reWrite - Settings")
             .decorations(true)
             .always_on_top(false)
             .inner_size(1260.0, 870.0)

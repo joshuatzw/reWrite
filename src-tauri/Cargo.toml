@@ -37,3 +37,8 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Security_Cryptography",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSString"] }

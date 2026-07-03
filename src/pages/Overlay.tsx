@@ -214,7 +214,7 @@ export default function Overlay() {
           )}
           {!capturedText && status === "idle" && (
             <p style={{ fontSize: 12, color: "#c0392b", paddingLeft: 0 }}>
-              No text captured — highlight some text first.
+              No text captured. Highlight some text first.
             </p>
           )}
         </div>
