@@ -177,7 +177,7 @@ CHECKOUT_CANCEL_URL  = https://yoursite.com/checkout/cancel
 - [x] Login screen (`LoginView` in `Settings.tsx`) — magic-link email flow, shown when no valid session
 - [x] Settings → Settings view — real `email`/`is_subscribed` from `get_auth_state`, plan badge, "Manage billing" / "Upgrade to Pro" / "Upgrade to Max" buttons, `X / 3 rewrites used this month` for free users
 - [x] Settings → Skills tab locked for free users — greyed-out nav item + lock icon, upsell card in place of the skill editor
-- [ ] Overlay / rewrite error handling — `402 { code: "limit_reached" }` currently surfaces as a generic error string in the overlay, not a dedicated "upgrade to continue" prompt. Still open.
+- [x] Overlay / rewrite error handling — `402 { code: "limit_reached" }` currently surfaces as a generic error string in the overlay, not a dedicated "upgrade to continue" prompt. Still open.
 - [ ] Super-hotkey path (`on_super_hotkey`) — does not yet soft-gate on cached subscription state before firing; a blocked request only surfaces once the Edge Function rejects it. Still open.
 
 ---
@@ -192,19 +192,66 @@ CHECKOUT_CANCEL_URL  = https://yoursite.com/checkout/cancel
 
 
 **NEW FEATURES**
-1. Context Menu 
-- Context menu: Ctrl + i = reads a chunk of text and understands what you want to reply to / frame. It will not rewrite/synthesize that text, it will just store it in memory so it knows how to respond. 
+1. Writing Style 
+Introduce a Tone of Voice feature that's created with every account. (it is however only accessible to Pro plans and above)
+In main menu, it sits below skills and above settings in the side bar (greyed out if user is free.)
+What this does is a repository of md files that cover the writing style of the user. These are manually edited and/uploaded by the user.
+You can add a new tone of voice and name it e.g. formal.md / brand_voice.md 
 
-2. Second Brain? 
+Editing the tone of Voice:
+
+
+Where this works:
+When creating a new skill, instead of building on an existing skill, instead reference the tone of voice (dropdown menu to select which tone of voice exists)
+
+When submitting prompts, the AI must take into account the tone of voice preferred. 
+*Note: there could be multiple in one tone of voice: e.g. formal, casual, could all be in one. So it is still important to understand the language of the higlighted phrase / instruction and rewrite the text accordingly. 
+
+
+2. Default Skills Change:
+Proofread -- Proofreads and fixes grammatical errors, spellings before you send them out. Retains your writing style as is. 
+#Prompt for Proofread: 
+Correct all spelling, grammar, and punctuation errors in the text below. 
+Do not change the writer's tone, vocabulary, sentence structure, or word choice unless it contains an actual error. 
+Do not rephrase for style, do not shorten or lengthen it, and do not make it more formal or casual.
+Preserve line breaks, formatting, and paragraph structure exactly as given.
+[IMPORTANT] Return only the corrected text, with no explanation or commentary.
+
+
+Polish -- Refines your current text to make it suitable for a third party to review it. polishes the language to make it professional.
+#Prompt for Polish: 
+Rewrite the text below so it is ready to be shared with a third party (e.g. a colleague, client, or manager) for review.
+Fix any grammar or clarity issues, tighten loose phrasing, and adjust tone so it reads as professional and considered.
+Keep the length roughly the same — do not summarize or expand significantly.
+Preserve the core meaning, intent, and key details exactly. Do not add new claims, arguments, or information.
+[IMPORTANT] Return only the rewritten text, with no explanation or commentary.
+
+
+
+Summarise -- Summarises a long thought or chunk, elevating the best bits so your message gets across
+#Prompt for Summarise:
+Summarize the text below, keeping only the most important points, decisions, or asks.
+Preserve the original intent and any critical details (numbers, names, deadlines, action items) — do not lose information that changes the meaning.
+Write in clear, complete sentences (not just fragments or bullet-only unless the input is already a list).
+Aim for roughly 30-50% of the original length, adjusting based on how much can be safely cut.
+[IMPORTANT] Return only the summary, with no explanation or commentary.
+
+
+Enhance (Beef it up) - Feel that the writing is too thin? rewrite enhances your email/proposal/executive summary so that it sounds polished and ready to go
+#Prompt for Enhance:
+The text below feels thin or underdeveloped. Rewrite it to be more substantial and persuasive, suitable for a polished email, proposal, or executive summary.
+Add depth by strengthening weak statements, making vague points more concrete, and improving the logical flow between ideas — but do not invent specific facts, numbers, or claims that aren't implied by the original.
+Elevate the language and structure so it reads as complete and ready to send, without becoming bloated or repetitive.
+[IMPORTANT] Return only the rewritten text, with no explanation or commentary.
+
+
+Here is 
+
 
 **BUGS:**
+I'm not happy with the default features. Let's change them to:
 
 
-2. Esc function
-- The Esc function works when I click away from the skill selector (Ctrl + .) window. 
-- If my focus is on the skill selector window, it will refuse to close when I press Esc
-- Once I click outside/away from the skill selector window, the ESc function works. 
-- Needs investigation and fixing. 
-- [new] I asked agent to investigate trial overlay closing behaviour and apply what it can to this behaviour 
-
-
+**Security and Abuse**
+- Server Security - since everyone has access to the supabase public key, i need to ensure that RLS is enabled for supabase to ensure no one changes their subscription status on their own
+- 

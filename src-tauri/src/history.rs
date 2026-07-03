@@ -34,16 +34,32 @@ pub fn count_words(text: &str) -> u32 {
 }
 
 pub fn load(path: &Path) -> HistoryStore {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(bytes) = fs::read(path) else {
+        return HistoryStore::default();
+    };
+    if bytes.is_empty() {
+        return HistoryStore::default();
+    }
+
+    // Preferred path: DPAPI-encrypted JSON. If decryption succeeds and the
+    // decrypted bytes parse as JSON, use that.
+    if let Some(plain) = crate::secure_store::decrypt(&bytes) {
+        if let Ok(store) = serde_json::from_slice::<HistoryStore>(&plain) {
+            return store;
+        }
+    }
+
+    // Legacy fallback: the file predates encryption and is raw plaintext JSON.
+    // Don't lose existing users' history.
+    serde_json::from_slice::<HistoryStore>(&bytes).unwrap_or_default()
 }
 
 pub fn save(store: &HistoryStore, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_string_pretty(store)?)?;
+    let json = serde_json::to_vec_pretty(store)?;
+    let cipher = crate::secure_store::encrypt(&json)?;
+    fs::write(path, cipher)?;
     Ok(())
 }

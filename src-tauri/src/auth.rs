@@ -25,15 +25,29 @@ pub struct SubscriptionCache {
 // ── Disk I/O ──────────────────────────────────────────────────────────────────
 
 pub fn load_session(path: &Path) -> Option<AuthSession> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // Preferred path: DPAPI-encrypted JSON.
+    if let Some(plain) = crate::secure_store::decrypt(&bytes) {
+        if let Ok(session) = serde_json::from_slice::<AuthSession>(&plain) {
+            return Some(session);
+        }
+    }
+
+    // Legacy fallback: raw plaintext JSON written before at-rest encryption.
+    serde_json::from_slice::<AuthSession>(&bytes).ok()
 }
 
 pub fn save_session(session: &AuthSession, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(session)?)?;
+    let json = serde_json::to_vec_pretty(session)?;
+    let cipher = crate::secure_store::encrypt(&json)?;
+    std::fs::write(path, cipher)?;
     Ok(())
 }
 
