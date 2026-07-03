@@ -12,17 +12,21 @@ pub mod auth;
 pub mod clipboard;
 pub mod commands;
 pub mod config;
+pub mod foreground;
 pub mod history;
 pub mod rewrite;
 pub mod secure_store;
 pub mod skills;
-pub mod tone_of_voice;
 #[cfg(target_os = "windows")]
 pub mod esc_hook;
 
 pub struct AppState {
     pub captured_text: Mutex<Option<String>>,
     pub original_clipboard: Mutex<Option<String>>,
+    /// Output format chosen from the foreground app at capture time (HTML for
+    /// rich-text targets like Outlook/Gmail, plain text otherwise). Sampled
+    /// before any of our own windows steal foreground.
+    pub foreground_format: Mutex<foreground::OutputFormat>,
     pub config: Mutex<config::Config>,
     pub skills_config: Mutex<skills::SkillsConfig>,
     pub history: Mutex<history::HistoryStore>,
@@ -35,7 +39,6 @@ pub struct AppState {
     pub is_rewriting: AtomicBool,
     pub auth_session: Mutex<Option<auth::AuthSession>>,
     pub subscription: Mutex<auth::SubscriptionCache>,
-    pub tones: Mutex<Vec<tone_of_voice::ToneOfVoice>>,
 }
 
 // ── Window helpers ────────────────────────────────────────────────────────────
@@ -168,7 +171,7 @@ pub fn show_settings(app: &AppHandle) {
         return;
     }
     if let Ok(w) = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
-        .title("reWrite — Settings")
+        .title("reWrite - Settings")
         .decorations(true)
         .always_on_top(false)
         .inner_size(1260.0, 870.0)
@@ -261,10 +264,6 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
             *state.subscription.lock().unwrap() = sub;
         }
 
-        if let Ok(t) = tone_of_voice::list_tones(&client, &session.access_token).await {
-            *state.tones.lock().unwrap() = t;
-        }
-
         let _ = app.emit("auth:complete", ());
     });
 }
@@ -273,6 +272,13 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
 fn on_hotkey(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
+
+    // Sample the foreground app now, while the target still has focus — before
+    // the overlay steals it — so we know whether to emit HTML or plain text.
+    if let Ok(mut fmt) = state.foreground_format.lock() {
+        *fmt = foreground::detect();
+    }
+
     if state.is_capturing.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -332,6 +338,14 @@ fn on_super_hotkey(app: &AppHandle) {
         return;
     }
 
+    // Sample the foreground app now — after the guards (so a dropped duplicate
+    // press can't overwrite the in-flight rewrite's format) but before
+    // `show_processing` below steals focus, so the decision reflects the user's
+    // real target app.
+    if let Ok(mut fmt) = state.foreground_format.lock() {
+        *fmt = foreground::detect();
+    }
+
     show_processing(app);
 
     let app = app.clone();
@@ -374,17 +388,19 @@ fn on_super_hotkey(app: &AppHandle) {
             (cfg.model.clone(), cfg.default_skill_id.clone(), cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
         };
 
+        let format = state
+            .foreground_format
+            .lock()
+            .map(|f| *f)
+            .unwrap_or_default();
+
         let (system, skill_name) = {
             let Ok(sc) = state.skills_config.lock() else {
                 hide_processing(&app);
                 return;
             };
-            let tone = match state.tones.lock() {
-                Ok(tones) => skills::resolve_tone_content(&sc, &tones, &default_skill_id),
-                Err(_) => None,
-            };
             let system =
-                skills::build_system_prompt(&sc, Some(&default_skill_id), tone.as_deref());
+                skills::build_system_prompt(&sc, Some(&default_skill_id), format);
             let name = skills::skill_display_name(&sc, &default_skill_id);
             (system, name)
         };
@@ -405,6 +421,12 @@ fn on_super_hotkey(app: &AppHandle) {
             }
         };
         let output = result.text;
+        // For HTML targets the model returns markup; keep a plain-text form for
+        // the clipboard fallback and for history / word-count.
+        let plain_output = match format {
+            foreground::OutputFormat::Html => clipboard::strip_html_tags(&output),
+            foreground::OutputFormat::PlainText => output.clone(),
+        };
 
         // Keep the local usage cache in step with the server-side count so the
         // Settings usage figure reflects super-hotkey rewrites too.
@@ -422,8 +444,8 @@ fn on_super_hotkey(app: &AppHandle) {
                 skill_id: default_skill_id,
                 skill_name,
                 input_text: text,
-                output_text: output.clone(),
-                output_word_count: history::count_words(&output),
+                output_text: plain_output.clone(),
+                output_word_count: history::count_words(&plain_output),
             };
             if let (Ok(mut h), Ok(path)) = (
                 state.history.lock(),
@@ -435,8 +457,17 @@ fn on_super_hotkey(app: &AppHandle) {
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
-        let _ = tokio::task::spawn_blocking(move || {
-            clipboard::paste_and_restore(&output, &original, restore, restore_delay_ms)
+        let _ = tokio::task::spawn_blocking(move || match format {
+            foreground::OutputFormat::Html => clipboard::paste_html_and_restore(
+                &output,
+                &plain_output,
+                &original,
+                restore,
+                restore_delay_ms,
+            ),
+            foreground::OutputFormat::PlainText => {
+                clipboard::paste_and_restore(&output, &original, restore, restore_delay_ms)
+            }
         })
         .await;
 
@@ -482,6 +513,7 @@ pub fn run() {
         .manage(AppState {
             captured_text: Mutex::new(None),
             original_clipboard: Mutex::new(None),
+            foreground_format: Mutex::new(foreground::OutputFormat::default()),
             config: Mutex::new(config::Config::default()),
             skills_config: Mutex::new(skills::SkillsConfig::default()),
             history: Mutex::new(history::HistoryStore::default()),
@@ -490,7 +522,6 @@ pub fn run() {
             is_rewriting: AtomicBool::new(false),
             auth_session: Mutex::new(None),
             subscription: Mutex::new(auth::SubscriptionCache::default()),
-            tones: Mutex::new(Vec::new()),
         })
         .setup(|app| {
             // ── Load config, skills, history ──────────────────────────────────
@@ -505,15 +536,7 @@ pub fn run() {
             *app.state::<AppState>().skills_config.lock().unwrap() = loaded_skills;
 
             let history_path = app.path().app_config_dir()?.join("history.json");
-            let mut loaded_history = history::load(&history_path);
-            // One-time purge: drop history entries for removed built-in skills.
-            let before_len = loaded_history.entries.len();
-            loaded_history
-                .entries
-                .retain(|e| e.skill_id != "__formal_email__" && e.skill_id != "__shorten__");
-            if loaded_history.entries.len() != before_len {
-                let _ = history::save(&loaded_history, &history_path);
-            }
+            let loaded_history = history::load(&history_path);
             *app.state::<AppState>().history.lock().unwrap() = loaded_history;
 
             // ── Auth: load session, refresh + sync in background ──────────────
@@ -553,10 +576,6 @@ pub fn run() {
 
                     if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
                         *state.subscription.lock().unwrap() = sub;
-                    }
-
-                    if let Ok(t) = tone_of_voice::list_tones(&client, &session.access_token).await {
-                        *state.tones.lock().unwrap() = t;
                     }
                 });
             }
@@ -724,7 +743,7 @@ pub fn run() {
                 "settings",
                 tauri::WebviewUrl::App("".into()),
             )
-            .title("reWrite — Settings")
+            .title("reWrite - Settings")
             .decorations(true)
             .always_on_top(false)
             .inner_size(1260.0, 870.0)
@@ -786,12 +805,6 @@ pub fn run() {
             commands::delete_skill,
             commands::reorder_skills,
             commands::toggle_builtin_skill,
-            commands::get_tones,
-            commands::refresh_tones,
-            commands::create_tone,
-            commands::update_tone,
-            commands::delete_tone,
-            commands::set_default_tone,
             commands::get_history,
             commands::get_auth_state,
             commands::send_magic_link,
