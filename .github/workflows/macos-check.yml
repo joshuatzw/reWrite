@@ -1,0 +1,45 @@
+name: macOS Compile Check
+
+# Cheap feedback loop for the macOS port: verifies the Rust crate compiles for
+# both Apple Silicon and Intel (the two halves of the Universal build) without
+# producing installers, signing, or touching the Windows release flow.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # tauri-build inspects the frontend dist during `cargo check`, so produce
+      # it exactly as a real build would.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: cargo check (Apple Silicon)
+        working-directory: src-tauri
+        run: cargo check --target aarch64-apple-darwin
+
+      - name: cargo check (Intel)
+        working-directory: src-tauri
+        run: cargo check --target x86_64-apple-darwin
