@@ -94,9 +94,15 @@ pub async fn rewrite_with_skill(
         (cfg.model.clone(), effective)
     };
     let skills_config = lock(&state.skills_config)?.clone();
+    let tones = lock(&state.tones)?.clone();
     let client = state.http_client.clone();
 
-    let system = crate::skills::build_system_prompt(&skills_config, Some(&effective_skill_id));
+    let tone = crate::skills::resolve_tone_content(&skills_config, &tones, &effective_skill_id);
+    let system = crate::skills::build_system_prompt(
+        &skills_config,
+        Some(&effective_skill_id),
+        tone.as_deref(),
+    );
     let user_message = format!("<text>\n{text}\n</text>");
 
     let result = crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
@@ -308,7 +314,7 @@ pub fn toggle_builtin_skill(
 pub fn create_skill(
     name: String,
     instructions: String,
-    base_skill_id: Option<String>,
+    tone_of_voice_id: Option<String>,
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<crate::skills::Skill, String> {
@@ -320,7 +326,7 @@ pub fn create_skill(
         instructions,
         enabled: true,
         order,
-        base_skill_id,
+        tone_of_voice_id,
     };
     config.skills.push(skill.clone());
     let path = skills_path(&app)?;
@@ -371,6 +377,109 @@ pub fn reorder_skills(
     let path = skills_path(&app)?;
     crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
     *lock(&state.skills_config)? = config;
+    Ok(())
+}
+
+// ── Tone of Voice commands ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_tones(state: State<AppState>) -> Vec<crate::tone_of_voice::ToneOfVoice> {
+    state.tones.lock().unwrap().clone()
+}
+
+/// Re-fetch tones from Supabase and update the cache.
+#[tauri::command]
+pub async fn refresh_tones(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<crate::tone_of_voice::ToneOfVoice>, String> {
+    let token = crate::ensure_valid_token(&app).await.ok_or("not_logged_in")?;
+    let client = state.http_client.clone();
+
+    let tones = crate::tone_of_voice::list_tones(&client, &token)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    *lock(&state.tones)? = tones.clone();
+    Ok(tones)
+}
+
+#[tauri::command]
+pub async fn create_tone(
+    name: String,
+    content: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<crate::tone_of_voice::ToneOfVoice, String> {
+    let token = crate::ensure_valid_token(&app).await.ok_or("not_logged_in")?;
+    let client = state.http_client.clone();
+
+    let created = crate::tone_of_voice::create_tone(&client, &token, &name, &content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(tones) = crate::tone_of_voice::list_tones(&client, &token).await {
+        *lock(&state.tones)? = tones;
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+pub async fn update_tone(
+    id: String,
+    name: String,
+    content: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let token = crate::ensure_valid_token(&app).await.ok_or("not_logged_in")?;
+    let client = state.http_client.clone();
+
+    crate::tone_of_voice::update_tone(&client, &token, &id, &name, &content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(tones) = crate::tone_of_voice::list_tones(&client, &token).await {
+        *lock(&state.tones)? = tones;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_tone(
+    id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let token = crate::ensure_valid_token(&app).await.ok_or("not_logged_in")?;
+    let client = state.http_client.clone();
+
+    crate::tone_of_voice::delete_tone(&client, &token, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(tones) = crate::tone_of_voice::list_tones(&client, &token).await {
+        *lock(&state.tones)? = tones;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_default_tone(
+    id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let token = crate::ensure_valid_token(&app).await.ok_or("not_logged_in")?;
+    let client = state.http_client.clone();
+
+    crate::tone_of_voice::set_default_tone(&client, &token, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(tones) = crate::tone_of_voice::list_tones(&client, &token).await {
+        *lock(&state.tones)? = tones;
+    }
     Ok(())
 }
 

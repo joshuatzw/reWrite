@@ -16,6 +16,7 @@ pub mod history;
 pub mod rewrite;
 pub mod secure_store;
 pub mod skills;
+pub mod tone_of_voice;
 #[cfg(target_os = "windows")]
 pub mod esc_hook;
 
@@ -34,6 +35,7 @@ pub struct AppState {
     pub is_rewriting: AtomicBool,
     pub auth_session: Mutex<Option<auth::AuthSession>>,
     pub subscription: Mutex<auth::SubscriptionCache>,
+    pub tones: Mutex<Vec<tone_of_voice::ToneOfVoice>>,
 }
 
 // ── Window helpers ────────────────────────────────────────────────────────────
@@ -259,6 +261,10 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
             *state.subscription.lock().unwrap() = sub;
         }
 
+        if let Ok(t) = tone_of_voice::list_tones(&client, &session.access_token).await {
+            *state.tones.lock().unwrap() = t;
+        }
+
         let _ = app.emit("auth:complete", ());
     });
 }
@@ -373,7 +379,12 @@ fn on_super_hotkey(app: &AppHandle) {
                 hide_processing(&app);
                 return;
             };
-            let system = skills::build_system_prompt(&sc, Some(&default_skill_id));
+            let tone = match state.tones.lock() {
+                Ok(tones) => skills::resolve_tone_content(&sc, &tones, &default_skill_id),
+                Err(_) => None,
+            };
+            let system =
+                skills::build_system_prompt(&sc, Some(&default_skill_id), tone.as_deref());
             let name = skills::skill_display_name(&sc, &default_skill_id);
             (system, name)
         };
@@ -479,6 +490,7 @@ pub fn run() {
             is_rewriting: AtomicBool::new(false),
             auth_session: Mutex::new(None),
             subscription: Mutex::new(auth::SubscriptionCache::default()),
+            tones: Mutex::new(Vec::new()),
         })
         .setup(|app| {
             // ── Load config, skills, history ──────────────────────────────────
@@ -493,7 +505,15 @@ pub fn run() {
             *app.state::<AppState>().skills_config.lock().unwrap() = loaded_skills;
 
             let history_path = app.path().app_config_dir()?.join("history.json");
-            let loaded_history = history::load(&history_path);
+            let mut loaded_history = history::load(&history_path);
+            // One-time purge: drop history entries for removed built-in skills.
+            let before_len = loaded_history.entries.len();
+            loaded_history
+                .entries
+                .retain(|e| e.skill_id != "__formal_email__" && e.skill_id != "__shorten__");
+            if loaded_history.entries.len() != before_len {
+                let _ = history::save(&loaded_history, &history_path);
+            }
             *app.state::<AppState>().history.lock().unwrap() = loaded_history;
 
             // ── Auth: load session, refresh + sync in background ──────────────
@@ -533,6 +553,10 @@ pub fn run() {
 
                     if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
                         *state.subscription.lock().unwrap() = sub;
+                    }
+
+                    if let Ok(t) = tone_of_voice::list_tones(&client, &session.access_token).await {
+                        *state.tones.lock().unwrap() = t;
                     }
                 });
             }
@@ -762,6 +786,12 @@ pub fn run() {
             commands::delete_skill,
             commands::reorder_skills,
             commands::toggle_builtin_skill,
+            commands::get_tones,
+            commands::refresh_tones,
+            commands::create_tone,
+            commands::update_tone,
+            commands::delete_tone,
+            commands::set_default_tone,
             commands::get_history,
             commands::get_auth_state,
             commands::send_magic_link,

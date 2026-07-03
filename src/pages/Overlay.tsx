@@ -21,17 +21,7 @@ function buildItems(cfg: SkillsConfig): SkillItem[] {
     .sort((a, b) => a.order - b.order);
 
   const customItems = enabled.map((s) => {
-    let description = s.instructions.trim();
-    if (!description) {
-      if (s.base_skill_id) {
-        const baseName =
-          BUILTIN_SKILLS.find((b) => b.id === s.base_skill_id)?.name ??
-          enabled.find((b) => b.id === s.base_skill_id)?.name;
-        description = baseName ? `Based on ${baseName}` : "No additional instructions.";
-      } else {
-        description = "No additional instructions.";
-      }
-    }
+    const description = s.instructions.trim() || "No additional instructions.";
     return { id: s.id, name: s.name, description };
   });
 

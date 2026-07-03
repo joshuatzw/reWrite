@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
+import type { Config, HistoryEntry, Skill, SkillsConfig, ToneOfVoice } from "../types";
 
 interface AuthState {
   logged_in: boolean;
@@ -194,6 +194,14 @@ const IconLock = () => (
   </svg>
 );
 
+const IconQuill = () => (
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M20.5 3.5c-4.5.4-8.4 2.3-11 5.4-1.8 2.1-2.8 4.7-2.9 7.6L4 19" />
+    <path d="M20.5 3.5c-.5 4.9-2.6 8-5.6 9.9-1.8 1.1-3.9 1.6-6 1.7" />
+    <path d="M5 19.5c2-2 4.2-3.2 6.5-3.7" />
+  </svg>
+);
+
 // ── Login view ────────────────────────────────────────────────────────────────
 
 function LoginView({ onLogin }: { onLogin: () => void }) {
@@ -275,7 +283,7 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
 
 // ── NavButton ──────────────────────────────────────────────────────────────────
 
-type ActiveView = "home" | "history" | "skills" | "settings";
+type ActiveView = "home" | "history" | "skills" | "writing-style" | "settings";
 
 function NavButton({ label, icon, active, onClick, locked }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void; locked?: boolean }) {
   const [hov, setHov] = useState(false);
@@ -314,6 +322,7 @@ function Sidebar({ active, setActive, authState }: { active: ActiveView; setActi
         <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
         <NavButton label="History"  icon={<IconHistory />} active={active === "history"}  onClick={() => setActive("history")} />
         <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} locked={!authState.is_subscribed} />
+        <NavButton label="Writing Style" icon={<IconQuill />} active={active === "writing-style"} onClick={() => setActive("writing-style")} locked={!authState.is_subscribed} />
         <NavButton label="Settings" icon={<IconGear />}    active={active === "settings"} onClick={() => setActive("settings")} />
       </nav>
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
@@ -574,10 +583,10 @@ function BuiltinSkillCard({ name, desc, enabled, onToggle }: { name: string; des
   );
 }
 
-function CustomSkillCard({ skill, onToggle, onEdit, onDelete }: { skill: Skill; onToggle: () => void; onEdit: () => void; onDelete: () => void }) {
+function CustomSkillCard({ skill, tones, onToggle, onEdit, onDelete }: { skill: Skill; tones: ToneOfVoice[]; onToggle: () => void; onEdit: () => void; onDelete: () => void }) {
   const [hov, setHov] = useState(false);
-  const baseName = BUILTIN_SKILL_OPTIONS.find((b) => b.id === skill.base_skill_id)?.name;
-  const tags = baseName ? [baseName, "Custom"] : ["Custom"];
+  const toneName = tones.find((t) => t.id === skill.tone_of_voice_id)?.name;
+  const tags = toneName ? [toneName, "Custom"] : ["Custom"];
   const desc = skill.instructions.trim() || "No instructions provided.";
 
   return (
@@ -624,19 +633,18 @@ function CreateSkillCard({ onClick }: { onClick: () => void }) {
   );
 }
 
-function SkillModal({ skill, allSkills, onSave, onClose, error }: { skill: Skill | null; allSkills: Skill[]; onSave: (name: string, instructions: string, baseSkillId: string) => void; onClose: () => void; error: string | null }) {
+function SkillModal({ skill, tones, onSave, onClose, error }: { skill: Skill | null; tones: ToneOfVoice[]; onSave: (name: string, instructions: string, toneOfVoiceId: string) => void; onClose: () => void; error: string | null }) {
   const [name, setName] = useState(skill?.name ?? "");
   const [instructions, setInstructions] = useState(skill?.instructions ?? "");
-  const [baseSkillId, setBaseSkillId] = useState<string>(skill?.base_skill_id ?? "");
+  const [toneOfVoiceId, setToneOfVoiceId] = useState<string>(skill?.tone_of_voice_id ?? "");
   const nameRef = useRef<HTMLInputElement>(null);
-  const otherSkills = skill ? allSkills.filter((s) => s.id !== skill.id) : allSkills;
 
   useEffect(() => { nameRef.current?.focus(); }, []);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
-    onSave(name.trim(), instructions, baseSkillId);
+    onSave(name.trim(), instructions, toneOfVoiceId);
   }
 
   return (
@@ -649,19 +657,12 @@ function SkillModal({ skill, allSkills, onSave, onClose, error }: { skill: Skill
             <input ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Slack Casual" style={{ width: "100%", border: "1px solid #e0e1e4", borderRadius: 9, padding: "10px 13px", fontSize: 14.5, color: "#16161a", outline: "none", boxSizing: "border-box", fontFamily: "inherit" }} />
           </div>
           <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#74777e", letterSpacing: .5, display: "block", marginBottom: 6, textTransform: "uppercase" }}>Base skill <span style={{ fontWeight: 400, color: "#9a9da3", textTransform: "none" }}>(optional)</span></label>
-            <select value={baseSkillId} onChange={(e) => setBaseSkillId(e.target.value)} style={{ width: "100%", border: "1px solid #e0e1e4", borderRadius: 9, padding: "10px 13px", fontSize: 14.5, color: "#16161a", background: "#fff", outline: "none", cursor: "pointer", boxSizing: "border-box", fontFamily: "inherit" }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#74777e", letterSpacing: .5, display: "block", marginBottom: 6, textTransform: "uppercase" }}>Tone of Voice <span style={{ fontWeight: 400, color: "#9a9da3", textTransform: "none" }}>(optional)</span></label>
+            <select value={toneOfVoiceId} onChange={(e) => setToneOfVoiceId(e.target.value)} style={{ width: "100%", border: "1px solid #e0e1e4", borderRadius: 9, padding: "10px 13px", fontSize: 14.5, color: "#16161a", background: "#fff", outline: "none", cursor: "pointer", boxSizing: "border-box", fontFamily: "inherit" }}>
               <option value="">None</option>
-              <optgroup label="Built-in">
-                {BUILTIN_SKILL_OPTIONS.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-              </optgroup>
-              {otherSkills.length > 0 && (
-                <optgroup label="Custom">
-                  {otherSkills.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </optgroup>
-              )}
+              {tones.map((t) => <option key={t.id} value={t.id}>{t.name}{t.is_default ? " (default)" : ""}</option>)}
             </select>
-            <div style={{ fontSize: 12, color: "#9a9da3", marginTop: 5 }}>Your instructions stack on top of the selected base skill.</div>
+            <div style={{ fontSize: 12, color: "#9a9da3", marginTop: 5 }}>Applies this saved writing style on top of your instructions.</div>
           </div>
           <div>
             <label style={{ fontSize: 12, fontWeight: 600, color: "#74777e", letterSpacing: .5, display: "block", marginBottom: 6, textTransform: "uppercase" }}>Instructions</label>
@@ -706,11 +707,13 @@ function SkillsView() {
   const [editingSkill, setEditingSkill] = useState<Skill | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [tones, setTones] = useState<ToneOfVoice[]>([]);
 
   useEffect(() => {
     invoke<SkillsConfig>("get_skills_config").then((cfg) => {
       setConfig({ ...cfg, skills: [...cfg.skills].sort((a, b) => a.order - b.order) });
     });
+    invoke<ToneOfVoice[]>("get_tones").then(setTones).catch(() => setTones([]));
   }, []);
 
   function isBuiltinEnabled(id: string): boolean {
@@ -738,9 +741,9 @@ function SkillsView() {
     }
   }
 
-  async function handleCreate(name: string, instructions: string, baseSkillId: string) {
+  async function handleCreate(name: string, instructions: string, toneOfVoiceId: string) {
     try {
-      const skill = await invoke<Skill>("create_skill", { name, instructions, baseSkillId: baseSkillId || null });
+      const skill = await invoke<Skill>("create_skill", { name, instructions, toneOfVoiceId: toneOfVoiceId || null });
       setConfig((prev) => ({ ...prev, skills: [...prev.skills, skill] }));
       setShowCreate(false);
       setSaveError(null);
@@ -749,8 +752,8 @@ function SkillsView() {
     }
   }
 
-  async function handleEdit(id: string, name: string, instructions: string, baseSkillId: string) {
-    const updated = { ...config, skills: config.skills.map((s) => s.id === id ? { ...s, name, instructions, base_skill_id: baseSkillId || null } : s) };
+  async function handleEdit(id: string, name: string, instructions: string, toneOfVoiceId: string) {
+    const updated = { ...config, skills: config.skills.map((s) => s.id === id ? { ...s, name, instructions, tone_of_voice_id: toneOfVoiceId || null } : s) };
     setConfig(updated);
     setEditingSkill(null);
     try {
@@ -788,8 +791,8 @@ function SkillsView() {
       {(showCreate || editingSkill) && (
         <SkillModal
           skill={editingSkill}
-          allSkills={config.skills}
-          onSave={editingSkill ? (n, i, b) => handleEdit(editingSkill.id, n, i, b) : handleCreate}
+          tones={tones}
+          onSave={editingSkill ? (n, i, t) => handleEdit(editingSkill.id, n, i, t) : handleCreate}
           onClose={() => { setShowCreate(false); setEditingSkill(null); setSaveError(null); }}
           error={saveError}
         />
@@ -838,11 +841,297 @@ function SkillsView() {
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
             {config.skills.map((skill) => (
-              <CustomSkillCard key={skill.id} skill={skill} onToggle={() => handleToggleCustom(skill.id)} onEdit={() => setEditingSkill(skill)} onDelete={() => setDeleteConfirmId(skill.id)} />
+              <CustomSkillCard key={skill.id} skill={skill} tones={tones} onToggle={() => handleToggleCustom(skill.id)} onEdit={() => setEditingSkill(skill)} onDelete={() => setDeleteConfirmId(skill.id)} />
             ))}
             <CreateSkillCard onClick={() => setShowCreate(true)} />
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Writing Style (Tone of Voice) ────────────────────────────────────────────────
+
+function ToneLockedView() {
+  return (
+    <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both" }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "70px 40px", border: "1px solid #e8e9ec", borderRadius: 15, background: "#fbfbfc" }}>
+        <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20 }}>
+          <IconLock />
+        </div>
+        <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 28, color: "#16161a", marginBottom: 8 }}>Writing Style is a Pro feature</h1>
+        <p style={{ fontSize: 14.5, color: "#74777e", maxWidth: 400, marginBottom: 26, lineHeight: 1.5 }}>
+          Craft reusable tone-of-voice profiles — a formal register, your brand voice, a casual Slack tone — and apply them to any skill. Available on Pro and Max plans.
+        </p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => invoke("open_checkout", { plan: "pro" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#16161a", border: "none", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Pro</button>
+          <button onClick={() => invoke("open_checkout", { plan: "max" })} style={{ fontSize: 13.5, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "10px 17px", cursor: "pointer", fontFamily: "inherit" }}>Upgrade to Max</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IconStar({ filled }: { filled: boolean }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill={filled ? ACCENT : "none"} stroke={filled ? ACCENT : "#b7bac0"} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2.5l2.95 5.98 6.6.96-4.77 4.65 1.13 6.56L12 17.6l-5.9 3.1 1.13-6.56L2.45 9.44l6.6-.96z" />
+    </svg>
+  );
+}
+
+function ToneRow({ tone, selected, onSelect, onSetDefault, onDelete }: { tone: ToneOfVoice; selected: boolean; onSelect: () => void; onSetDefault: () => void; onDelete: () => void }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      onClick={onSelect}
+      style={{
+        display: "flex", alignItems: "center", gap: 9, padding: "10px 11px", borderRadius: 10, cursor: "pointer",
+        transition: "background .14s, box-shadow .14s",
+        background: selected ? "#fff" : hov ? "rgba(0,0,0,.04)" : "transparent",
+        border: selected ? "1px solid #e3e4e7" : "1px solid transparent",
+        boxShadow: selected ? "0 1px 2px rgba(20,20,26,.10)" : "none",
+      }}
+    >
+      <button
+        onClick={(e) => { e.stopPropagation(); onSetDefault(); }}
+        title={tone.is_default ? "Default tone of voice" : "Set as default"}
+        style={{ background: "none", border: "none", cursor: "pointer", padding: 2, display: "flex", alignItems: "center", flexShrink: 0 }}
+      >
+        <IconStar filled={tone.is_default} />
+      </button>
+      <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: selected ? 600 : 500, color: selected ? "#16161a" : "#44464d", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontFamily: "monospace" }}>{tone.name}</span>
+      {hov && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title="Delete"
+          style={{ width: 24, height: 24, borderRadius: 6, background: "#fdf1f1", border: "1px solid #fad8d8", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#c0392b", flexShrink: 0 }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6m4-6v6" /><path d="M9 6V4h6v2" /></svg>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ToneOfVoiceView() {
+  const [tones, setTones] = useState<ToneOfVoice[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [content, setContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    invoke<ToneOfVoice[]>("get_tones").then((list) => {
+      setTones(list);
+      if (list.length > 0) {
+        setSelectedId(list[0].id);
+        setName(list[0].name);
+        setContent(list[0].content);
+      }
+    }).catch((err) => setError(String(err)));
+  }, []);
+
+  const editing = creating || selectedId !== null;
+  const dirty = (() => {
+    if (creating) return name.trim().length > 0 || content.length > 0;
+    const current = tones.find((t) => t.id === selectedId);
+    if (!current) return false;
+    return current.name !== name || current.content !== content;
+  })();
+
+  function selectTone(t: ToneOfVoice) {
+    setCreating(false);
+    setSelectedId(t.id);
+    setName(t.name);
+    setContent(t.content);
+    setError(null);
+  }
+
+  function startNew() {
+    setCreating(true);
+    setSelectedId(null);
+    setName("");
+    setContent("");
+    setError(null);
+    setTimeout(() => nameRef.current?.focus(), 0);
+  }
+
+  async function reloadTones(): Promise<ToneOfVoice[]> {
+    const list = await invoke<ToneOfVoice[]>("get_tones");
+    setTones(list);
+    return list;
+  }
+
+  async function handleSave() {
+    const n = name.trim();
+    if (!n) return;
+    setSaving(true);
+    setError(null);
+    try {
+      if (creating || selectedId === null) {
+        const created = await invoke<ToneOfVoice>("create_tone", { name: n, content });
+        await reloadTones();
+        setCreating(false);
+        setSelectedId(created.id);
+        setName(created.name);
+        setContent(created.content);
+      } else {
+        await invoke("update_tone", { id: selectedId, name: n, content });
+        await reloadTones();
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSetDefault(id: string) {
+    try {
+      await invoke("set_default_tone", { id });
+      await reloadTones();
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleDelete(id: string) {
+    try {
+      await invoke("delete_tone", { id });
+      const list = await reloadTones();
+      if (selectedId === id) {
+        setCreating(false);
+        if (list.length > 0) {
+          selectTone(list[0]);
+        } else {
+          setSelectedId(null);
+          setName("");
+          setContent("");
+        }
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  return (
+    <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both", height: "100%", display: "flex", flexDirection: "column", boxSizing: "border-box" }}>
+      {deleteConfirmId && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+          <div style={{ background: "#fff", borderRadius: 16, padding: 28, width: 320, boxShadow: "0 20px 60px rgba(0,0,0,.2)" }}>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>Delete tone of voice?</div>
+            <div style={{ fontSize: 13.5, color: "#74777e", marginBottom: 24 }}>This will permanently remove this writing style. Skills using it will fall back to the default.</div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setDeleteConfirmId(null)} style={{ fontSize: 13.5, color: "#74777e", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 9, padding: "9px 16px", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              <button onClick={async () => { await handleDelete(deleteConfirmId); setDeleteConfirmId(null); }} style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: "#c0392b", border: "none", borderRadius: 9, padding: "9px 16px", cursor: "pointer", fontFamily: "inherit" }}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <header style={{ marginBottom: 26, flexShrink: 0 }}>
+        <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 46, lineHeight: 1.02, color: "#16161a", letterSpacing: -.5 }}>Writing Style</h1>
+        <p style={{ fontSize: 16, color: "#74777e", marginTop: 9 }}>Define reusable tones of voice in Markdown, then apply them to your skills.</p>
+      </header>
+
+      <div style={{ display: "flex", gap: 22, flex: 1, minHeight: 0 }}>
+        {/* Left column — tone list */}
+        <div style={{ width: 264, minWidth: 264, display: "flex", flexDirection: "column", gap: 12 }}>
+          <button
+            onClick={startNew}
+            style={{ display: "flex", alignItems: "center", gap: 9, background: "#16161a", color: "#fff", borderRadius: 11, padding: "11px 15px", fontSize: 14, fontWeight: 600, cursor: "pointer", border: "none", fontFamily: "inherit", flexShrink: 0 }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2" strokeLinecap="round" fill="none"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            New tone of voice
+          </button>
+          <div className="rw-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3, background: "#f4f5f6", border: "1px solid #e8e9ec", borderRadius: 12, padding: 8 }}>
+            {creating && (
+              <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 11px", borderRadius: 10, background: "#fff", border: "1px dashed #c9cbd0", boxShadow: "0 1px 2px rgba(20,20,26,.10)" }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: "#9a9da3", fontFamily: "monospace", fontStyle: "italic" }}>{name.trim() || "Untitled…"}</span>
+              </div>
+            )}
+            {tones.length === 0 && !creating ? (
+              <div style={{ padding: "26px 14px", textAlign: "center", fontSize: 13, color: "#9a9da3", lineHeight: 1.5 }}>No tones of voice yet.</div>
+            ) : (
+              tones.map((t) => (
+                <ToneRow
+                  key={t.id}
+                  tone={t}
+                  selected={!creating && selectedId === t.id}
+                  onSelect={() => selectTone(t)}
+                  onSetDefault={() => handleSetDefault(t.id)}
+                  onDelete={() => setDeleteConfirmId(t.id)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Right column — editor */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", background: "#fff", border: "1px solid #e8e9ec", borderRadius: 15, padding: "22px 24px" }}>
+          {editing ? (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                <input
+                  ref={nameRef}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="formal.md"
+                  style={{ flex: 1, border: "1px solid #e0e1e4", borderRadius: 9, padding: "10px 13px", fontSize: 15, fontWeight: 600, color: "#16161a", outline: "none", boxSizing: "border-box", fontFamily: "monospace" }}
+                />
+                {!creating && selectedId !== null && (
+                  <button
+                    onClick={() => handleSetDefault(selectedId)}
+                    title={tones.find((t) => t.id === selectedId)?.is_default ? "This is your default" : "Set as default"}
+                    style={{ display: "flex", alignItems: "center", gap: 6, background: tones.find((t) => t.id === selectedId)?.is_default ? "#f3f4f5" : "#fff", border: "1px solid #e6e7ea", borderRadius: 9, padding: "9px 13px", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: "#5b5e66", flexShrink: 0 }}
+                  >
+                    <IconStar filled={!!tones.find((t) => t.id === selectedId)?.is_default} />
+                    {tones.find((t) => t.id === selectedId)?.is_default ? "Default" : "Set default"}
+                  </button>
+                )}
+              </div>
+              <textarea
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                placeholder={"Describe the writing style in Markdown…\n\ne.g.\n# Brand Voice\n- Warm, confident, and concise\n- Prefer active voice and short sentences\n- Avoid jargon and hedging"}
+                className="rw-scroll"
+                style={{ flex: 1, minHeight: 0, marginTop: 14, border: "1px solid #e0e1e4", borderRadius: 11, padding: "15px 16px", fontSize: 14, lineHeight: 1.6, color: "#1f2026", outline: "none", resize: "none", fontFamily: "'SFMono-Regular', ui-monospace, Menlo, monospace", boxSizing: "border-box", background: "#fcfcfd" }}
+              />
+              {error && <div style={{ fontSize: 12.5, color: "#c0392b", marginTop: 10 }}>{error}</div>}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 16, flexShrink: 0 }}>
+                <div style={{ fontSize: 12.5, color: "#9a9da3" }}>
+                  {creating ? "New tone of voice — unsaved" : dirty ? "Unsaved changes" : "All changes saved"}
+                </div>
+                <button
+                  onClick={handleSave}
+                  disabled={!name.trim() || saving || (!dirty && !creating)}
+                  style={{ fontSize: 13.5, fontWeight: 600, color: "#fff", background: (!name.trim() || (!dirty && !creating)) ? "#9a9da3" : "#16161a", border: "none", borderRadius: 9, padding: "10px 20px", cursor: (!name.trim() || (!dirty && !creating)) ? "not-allowed" : "pointer", fontFamily: "inherit" }}
+                >
+                  {saving ? "Saving…" : creating ? "Create tone" : "Save changes"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 40 }}>
+              <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#f1f2f4", color: "#5b5e66", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 18 }}>
+                <IconQuill />
+              </div>
+              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 600, color: "#16161a", marginBottom: 8 }}>No tone of voice selected</div>
+              <p style={{ fontSize: 14.5, color: "#74777e", maxWidth: 360, lineHeight: 1.5, marginBottom: 22 }}>
+                Create a tone of voice — like <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>formal.md</code> or <code style={{ fontFamily: "monospace", color: "#5b5e66" }}>brand_voice.md</code> — and apply it to any skill.
+              </p>
+              <button onClick={startNew} style={{ fontSize: 14, fontWeight: 600, color: "#16161a", background: "#f3f4f5", border: "1px solid #e6e7ea", borderRadius: 11, padding: "11px 22px", cursor: "pointer", fontFamily: "inherit" }}>Create your first tone</button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1200,6 +1489,7 @@ export default function Settings() {
         {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} authState={authState} />}
         {active === "history"  && <HistoryView history={history} />}
         {active === "skills"   && (authState.is_subscribed ? <SkillsView /> : <SkillsLockedView />)}
+        {active === "writing-style" && (authState.is_subscribed ? <ToneOfVoiceView /> : <ToneLockedView />)}
         {active === "settings" && <SettingsView authState={authState} onLogout={loadAuthState} />}
       </main>
     </div>
