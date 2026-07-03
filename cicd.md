@@ -42,7 +42,8 @@ CI is ~a day. A *shippable, signed, working* macOS build is a small porting proj
       feature in `Cargo.toml` + `"macOSPrivateApi": true` in `tauri.conf.json`.
       NOTE: bars Mac App Store submission (fine for Developer ID distribution).
 - [x] Windows `cargo check` still green locally after the refactor (58s).
-- [ ] Get a green `cargo check` for both arches in CI (PR #1) — validates the macOS-only code.
+- [x] **Green `cargo check` for both arches in CI** (PR #1, run 28661327576, 3m8s) — macOS-only
+      code (Keychain/AES + private-api) compiles on real Mac runners. **Phase 1 compiles.**
 
 ### Phase 2 — Make it actually work at runtime (verify on real macOS)
 - [ ] **Verify `foreground.rs` macOS path** (NSWorkspace/objc2) — currently unverified.
