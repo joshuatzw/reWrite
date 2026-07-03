@@ -57,29 +57,39 @@ CI is ~a day. A *shippable, signed, working* macOS build is a small porting proj
 - [ ] Tray icon + window pre-warm behavior (Windows pre-warm gotcha is Windows-specific — recheck on mac).
 
 ### Phase 3 — CI workflow (matrix build)
-- [ ] Convert `release.yml` to a matrix adding a macOS runner:
-  ```yaml
-  strategy:
-    matrix:
-      include:
-        - platform: windows-latest
-          args: ""
-        - platform: macos-latest
-          args: "--target universal-apple-darwin"
-  runs-on: ${{ matrix.platform }}
-  ```
-- [ ] Add `rustup target add aarch64-apple-darwin x86_64-apple-darwin` step (needed for universal).
-- [ ] Pass `args: ${{ matrix.args }}` to `tauri-action`.
+- [x] **`release.yml` converted to a Windows+macOS matrix** (branch `ci/macos-release-matrix`).
+      - macOS runner builds `--target universal-apple-darwin`; rust targets added via the
+        toolchain action per-matrix (`rust-targets`).
+      - `args: ${{ matrix.args }}` wired to tauri-action; `fail-fast: false` so one OS failing
+        doesn't kill the other.
+      - Added `workflow_dispatch` (input `tag`, default `manual-test`) → produces a **draft**
+        release for pipeline testing without cutting a real `v*` tag.
+      - Apple signing env vars wired but **inert until secrets are set** (unsigned build still
+        produces artifacts).
 - [x] Early win DONE: **`cargo check` on macOS on every PR/push to main** →
-      `.github/workflows/macos-check.yml` (checks both aarch64 + x86_64; no installers/signing;
-      does not touch the Windows `release.yml`). This is the feedback loop for Phase 1.
+      `.github/workflows/macos-check.yml` (both arches; no installers/signing).
+- [ ] Validate the matrix produces a macOS bundle: run **Actions → Release → Run workflow**
+      (manual draft build) once merged, before relying on a real tag.
 
 ### Phase 4 — Code signing & notarization
-- [ ] Create a **Developer ID Application** certificate; export as `.p12`.
-- [ ] Add repo secrets for `tauri-action`: `APPLE_CERTIFICATE` (base64 .p12),
-      `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-      `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`.
-- [ ] Confirm notarization succeeds (tauri-action runs `notarytool` when those env vars are present).
+Secrets to add under **repo → Settings → Secrets and variables → Actions**. The workflow
+already references all of these; adding them flips the macOS build from unsigned → notarized.
+
+- [ ] **Developer ID Application** cert. If you have a Mac: create it in Keychain Access
+      (Certificate Assistant → request from a CA) + Apple Developer portal, then export the
+      cert **with its private key** as `.p12`. (No Mac = harder; needs a CSR — do this on a
+      borrowed Mac or a cloud Mac.)
+- [ ] `APPLE_CERTIFICATE` = base64 of the `.p12`:
+      - macOS/Linux: `base64 -i cert.p12 | pbcopy`
+      - Windows PowerShell: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.p12")) | Set-Clipboard`
+- [ ] `APPLE_CERTIFICATE_PASSWORD` = the password set when exporting the `.p12`.
+- [ ] `APPLE_SIGNING_IDENTITY` = e.g. `Developer ID Application: Your Name (TEAMID)`.
+- [ ] `APPLE_ID` = your Apple account email.
+- [ ] `APPLE_PASSWORD` = an **app-specific password** (appleid.apple.com → Sign-In & Security),
+      NOT your real password.
+- [ ] `APPLE_TEAM_ID` = 10-char team id from the developer portal.
+- [ ] Confirm notarization succeeds (tauri-action runs `notarytool` automatically once the
+      APPLE_* vars are present).
 
 ### Phase 5 — Auto-updater cross-platform
 - [ ] Updater endpoint (`latest.json`) already works; `tauri-action` adds the `darwin-aarch64` /

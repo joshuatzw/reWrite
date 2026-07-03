@@ -4,12 +4,33 @@ on:
   push:
     tags:
       - "v*"
+  # Manual builds for validating the pipeline without cutting a real version tag.
+  # Produces a DRAFT release named after `tag` (default "manual-test") that you can
+  # inspect and delete; it is never published to end users.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release/tag name for a manual draft build"
+        required: false
+        default: "manual-test"
 
 jobs:
   release:
-    runs-on: windows-latest
     permissions:
       contents: write
+    strategy:
+      # Don't cancel the Windows build if macOS fails (or vice versa) — we want to
+      # see both results on a release.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,6 +39,8 @@ jobs:
           node-version: lts/*
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -29,10 +52,21 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri updater signing (both platforms)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing + notarization. Only consumed on the macOS runner;
+          # if these secrets are unset, tauri-action still builds an unsigned .app
+          # (usable for testing, but Gatekeeper-blocked for real users).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "reWrite ${{ github.ref_name }}"
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "reWrite ${{ github.event.inputs.tag || github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}
