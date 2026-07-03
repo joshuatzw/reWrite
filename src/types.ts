@@ -4,14 +4,7 @@ export interface Skill {
   instructions: string;
   enabled: boolean;
   order: number;
-  tone_of_voice_id?: string | null;
-}
-
-export interface ToneOfVoice {
-  id: string;
-  name: string;
-  content: string;
-  is_default: boolean;
+  base_skill_id?: string | null;
 }
 
 export interface SkillsConfig {

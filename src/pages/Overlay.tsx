@@ -21,7 +21,17 @@ function buildItems(cfg: SkillsConfig): SkillItem[] {
     .sort((a, b) => a.order - b.order);
 
   const customItems = enabled.map((s) => {
-    const description = s.instructions.trim() || "No additional instructions.";
+    let description = s.instructions.trim();
+    if (!description) {
+      if (s.base_skill_id) {
+        const baseName =
+          BUILTIN_SKILLS.find((b) => b.id === s.base_skill_id)?.name ??
+          enabled.find((b) => b.id === s.base_skill_id)?.name;
+        description = baseName ? `Based on ${baseName}` : "No additional instructions.";
+      } else {
+        description = "No additional instructions.";
+      }
+    }
     return { id: s.id, name: s.name, description };
   });
 
@@ -214,7 +224,7 @@ export default function Overlay() {
           )}
           {!capturedText && status === "idle" && (
             <p style={{ fontSize: 12, color: "#c0392b", paddingLeft: 0 }}>
-              No text captured — highlight some text first.
+              No text captured. Highlight some text first.
             </p>
           )}
         </div>
