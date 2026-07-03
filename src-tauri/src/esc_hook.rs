@@ -22,8 +22,10 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 pub fn start(app: &AppHandle) {
     let _ = APP.get_or_init(|| app.clone());
     if HOOK_THREAD_ID.load(Ordering::SeqCst) != 0 {
+        crate::trace("esc_hook::start: already running");
         return; // already running
     }
+    crate::trace("esc_hook::start: spawning hook thread");
     std::thread::spawn(run_hook_thread);
 }
 
@@ -63,6 +65,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if code >= 0 && wparam == WM_KEYDOWN as usize {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
         if kb.vkCode == 0x1B {
+            crate::trace("esc_hook::hook_proc: ESC keydown");
             // VK_ESCAPE — hide overlay if it is currently visible.
             // The hook is only installed while the overlay is shown, so any
             // Escape press at this point should dismiss it.

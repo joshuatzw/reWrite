@@ -56,9 +56,9 @@ pub fn save(config: &SkillsConfig, path: &Path) -> Result<()> {
 pub fn builtin_display_name(id: &str) -> Option<&'static str> {
     match id {
         "__proofread__" => Some("Proofread"),
-        "__formal_email__" => Some("Formal Email"),
+        "__polish__" => Some("Polish"),
         "__summarise__" => Some("Summarise"),
-        "__shorten__" => Some("Shorten"),
+        "__enhance__" => Some("Enhance"),
         _ => None,
     }
 }
@@ -81,10 +81,10 @@ pub fn is_builtin_enabled(config: &SkillsConfig, id: &str) -> bool {
 
 fn builtin_core_prompt(id: &str) -> Option<&'static str> {
     match id {
-        "__proofread__" => Some("Proofread the following text. Fix spelling mistakes and improve sentence structure and flow where needed, but preserve the author's tone, voice, and overall message. Do not rephrase ideas or change the content — only correct errors and smooth out awkward phrasing."),
-        "__formal_email__" => Some("Rewrite the following as a polished, professional business email. Preserve the meaning. Use clear paragraphs and a respectful, formal tone."),
-        "__summarise__" => Some("Summarise the following text as concise bullet points. Every item must be a bullet point starting with '•'. You are not to write any paragraphs or prose. Separate bullet points with break space."),
-        "__shorten__" => Some("Shorten the following text while preserving its full meaning. Be concise and remove unnecessary words."),
+        "__proofread__" => Some("Correct all spelling, grammar, and punctuation errors in the text below.\nDo not change the writer's tone, vocabulary, sentence structure, or word choice unless it contains an actual error.\nDo not rephrase for style, do not shorten or lengthen it, and do not make it more formal or casual.\nPreserve line breaks, formatting, and paragraph structure exactly as given."),
+        "__polish__" => Some("Rewrite the text below so it is ready to be shared with a third party (e.g. a colleague, client, or manager) for review.\nFix any grammar or clarity issues, tighten loose phrasing, and adjust tone so it reads as professional and considered.\nKeep the length roughly the same — do not summarize or expand significantly.\nPreserve the core meaning, intent, and key details exactly. Do not add new claims, arguments, or information."),
+        "__summarise__" => Some("Summarize the text below, keeping only the most important points, decisions, or asks.\nPreserve the original intent and any critical details (numbers, names, deadlines, action items) — do not lose information that changes the meaning.\nWrite in clear, complete sentences (not just fragments or bullet-only unless the input is already a list).\nAim for roughly 30-50% of the original length, adjusting based on how much can be safely cut."),
+        "__enhance__" => Some("The text below feels thin or underdeveloped. Rewrite it to be more substantial and persuasive, suitable for a polished email, proposal, or executive summary.\nAdd depth by strengthening weak statements, making vague points more concrete, and improving the logical flow between ideas — but do not invent specific facts, numbers, or claims that aren't implied by the original.\nElevate the language and structure so it reads as complete and ready to send, without becoming bloated or repetitive."),
         _ => None,
     }
 }

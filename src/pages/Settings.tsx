@@ -587,7 +587,7 @@ function CustomSkillCard({ skill, onToggle, onEdit, onDelete }: { skill: Skill; 
       style={{ background: "#fff", border: "1px solid #e8e9ec", borderRadius: 15, padding: "24px 24px 22px", display: "flex", flexDirection: "column", position: "relative", transition: "box-shadow .14s", boxShadow: hov ? "0 4px 16px rgba(20,20,26,.08)" : "none" }}
     >
       {hov && (
-        <div style={{ position: "absolute", top: 14, right: 56, display: "flex", gap: 4 }}>
+        <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", gap: 6, background: "rgba(255,255,255,.92)", backdropFilter: "blur(2px)", padding: 4, borderRadius: 9, boxShadow: "0 2px 8px rgba(20,20,26,.1)" }}>
           <button onClick={onEdit} title="Edit" style={{ width: 28, height: 28, borderRadius: 7, background: "#f3f4f5", border: "1px solid #e6e7ea", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#5b5e66" }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z" /></svg>
           </button>
@@ -601,7 +601,7 @@ function CustomSkillCard({ skill, onToggle, onEdit, onDelete }: { skill: Skill; 
         <Toggle on={skill.enabled} onToggle={onToggle} />
       </div>
       <p style={{ fontSize: 14, color: "#74777e", lineHeight: 1.5, marginTop: 9, minHeight: 42, overflow: "hidden", maxHeight: "3.15em" }}>{desc}</p>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 16 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 16, paddingRight: 84 }}>
         {tags.map((t, i) => (
           <span key={i} style={{ fontSize: 11.5, fontWeight: 500, color: "#5b5e66", background: "#f3f4f5", border: "1px solid #ebecee", padding: "4px 10px", borderRadius: 7 }}>{t}</span>
         ))}
