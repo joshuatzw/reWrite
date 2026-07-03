@@ -84,9 +84,8 @@ pub async fn rewrite_with_skill(
         .clone()
         .ok_or("No text captured. Highlight some text and try again.")?;
 
-    let access_token = lock(&state.auth_session)?
-        .as_ref()
-        .map(|s| s.access_token.clone())
+    let access_token = crate::ensure_valid_token(&app)
+        .await
         .ok_or("not_logged_in")?;
 
     let (model, effective_skill_id) = {
@@ -436,9 +435,8 @@ pub async fn open_checkout(
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
-    let access_token = lock(&state.auth_session)?
-        .as_ref()
-        .map(|s| s.access_token.clone())
+    let access_token = crate::ensure_valid_token(&app)
+        .await
         .ok_or("Not logged in")?;
 
     let url = crate::auth::create_checkout_url(&state.http_client, &access_token, &plan)
@@ -455,9 +453,8 @@ pub async fn open_billing_portal(
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
-    let access_token = lock(&state.auth_session)?
-        .as_ref()
-        .map(|s| s.access_token.clone())
+    let access_token = crate::ensure_valid_token(&app)
+        .await
         .ok_or("Not logged in")?;
 
     let url = crate::auth::create_portal_url(&state.http_client, &access_token)
@@ -468,10 +465,12 @@ pub async fn open_billing_portal(
 }
 
 #[tauri::command]
-pub async fn refresh_subscription(state: State<'_, AppState>) -> Result<(), String> {
-    let access_token = lock(&state.auth_session)?
-        .as_ref()
-        .map(|s| s.access_token.clone())
+pub async fn refresh_subscription(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let access_token = crate::ensure_valid_token(&app)
+        .await
         .ok_or("Not logged in")?;
 
     let sub = crate::auth::sync_subscription(&state.http_client, &access_token)

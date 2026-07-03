@@ -30,7 +30,12 @@ const ABUSE_PATTERNS: RegExp[] = [
   /```[\s\S]*```/, // fenced code blocks
   /\b(function|def)\s+\w+\s*\(/i,
   /\bimport\s+[\w.]+/i,
-  /\bSELECT\b[\s\S]{0,200}\bFROM\b/i,
+  // Requires actual SQL structure (not just "select … from" prose): either a
+  // `*` or a genuine 2+ column comma-list immediately before FROM, or a
+  // FROM <table> followed by a real SQL clause/terminator. A single word
+  // between SELECT and FROM ("select data from various sources") is treated as
+  // prose — bare single-column SQL is left to the model-side backstop.
+  /\bSELECT\s+(?:DISTINCT\s+)?(?:\*|[\w.]+\s*,\s*[\w.]+(?:\s*,\s*[\w.]+)*)\s+FROM\b|\bSELECT\b[\s\S]{0,200}?\bFROM\s+[\w.]+\s*(?:;|\bWHERE\b|\bJOIN\b|\bGROUP\s+BY\b|\bORDER\s+BY\b)/i,
   /ignore (all|any|the) (previous|prior|above) instructions/i,
   /disregard (the|all) (above|previous|prior)/i,
   /you are now (a|an)\b/i,
@@ -85,38 +90,11 @@ serve(async (req) => {
   const { data: { user }, error: authErr } = await supabase.auth.getUser();
   if (authErr || !user) return json({ error: "Unauthorized" }, 401);
 
-  // Read subscription cache (service role bypasses RLS)
-  const admin = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
-
-  const { data: profile } = await admin
-    .from("profiles")
-    .select("is_subscribed, plan")
-    .eq("id", user.id)
-    .single();
-
-  const monthlyLimit = monthlyLimitFor(profile?.is_subscribed ? profile.plan : null);
-  const currentMonth = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
-
-  // Atomically check + record usage (avoids a read-then-write race that
-  // would let concurrent requests all slip past the limit check).
-  const { data: usage, error: usageErr } = await admin.rpc("check_and_increment_usage", {
-    p_user_id: user.id,
-    p_month: currentMonth,
-    p_monthly_limit: monthlyLimit,
-  }).single();
-
-  if (usageErr) return json({ error: "Usage check failed" }, 500);
-
-  if (!usage.allowed) {
-    return json({ error: "Monthly limit reached", code: "limit_reached" }, 402);
-  }
-
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) return json({ error: "Service not configured" }, 500);
 
+  // All cheap request validation happens BEFORE we touch usage accounting,
+  // so malformed/rejected requests never burn a user's monthly quota.
   let body: RewriteRequest;
   try {
     body = await req.json();
@@ -138,6 +116,37 @@ serve(async (req) => {
 
   if (looksLikeAbuse(system_prompt) || looksLikeAbuse(user_message)) {
     return json({ error: SCOPE_VIOLATION_MESSAGE, code: "scope_violation" }, 403);
+  }
+
+  // Read subscription cache (service role bypasses RLS)
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("is_subscribed, plan")
+    .eq("id", user.id)
+    .single();
+
+  const monthlyLimit = monthlyLimitFor(profile?.is_subscribed ? profile.plan : null);
+  const currentMonth = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+
+  // Atomically check + record usage (avoids a read-then-write race that
+  // would let concurrent requests all slip past the limit check). Only
+  // reached once the request has passed all cheap validation above, so
+  // rejected/malformed requests no longer consume quota.
+  const { data: usage, error: usageErr } = await admin.rpc("check_and_increment_usage", {
+    p_user_id: user.id,
+    p_month: currentMonth,
+    p_monthly_limit: monthlyLimit,
+  }).single();
+
+  if (usageErr) return json({ error: "Usage check failed" }, 500);
+
+  if (!usage.allowed) {
+    return json({ error: "Monthly limit reached", code: "limit_reached" }, 402);
   }
 
   const guardedSystemPrompt = buildGuardedSystemPrompt(system_prompt);
@@ -178,7 +187,7 @@ serve(async (req) => {
 
   if (!text) return json({ error: "No text in API response" }, 500);
 
-  if (text.trim().startsWith(SCOPE_SENTINEL)) {
+  if (text.includes(SCOPE_SENTINEL)) {
     return json({ error: SCOPE_VIOLATION_MESSAGE, code: "scope_violation" }, 403);
   }
 

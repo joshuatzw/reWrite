@@ -14,6 +14,7 @@ pub mod commands;
 pub mod config;
 pub mod history;
 pub mod rewrite;
+pub mod secure_store;
 pub mod skills;
 #[cfg(target_os = "windows")]
 pub mod esc_hook;
@@ -26,6 +27,11 @@ pub struct AppState {
     pub history: Mutex<history::HistoryStore>,
     pub http_client: reqwest::Client,
     pub is_capturing: AtomicBool,
+    /// In-flight guard covering the ENTIRE super-hotkey rewrite
+    /// (capture → API → paste), so hammering the super-hotkey cannot fire
+    /// overlapping API calls / racing clipboard writes. `is_capturing` only
+    /// covers the capture phase; this covers the whole operation.
+    pub is_rewriting: AtomicBool,
     pub auth_session: Mutex<Option<auth::AuthSession>>,
     pub subscription: Mutex<auth::SubscriptionCache>,
 }
@@ -96,6 +102,54 @@ pub fn hide_processing(app: &AppHandle) {
 fn is_limit_error(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("limit") || m.contains("trial") || m.contains("quota") || m.contains("upgrade")
+}
+
+/// Return a currently-valid Supabase access token, refreshing it on demand when
+/// the stored one has expired (or is within `is_expired`'s skew window).
+///
+/// Supabase access tokens live ~1 hour. We previously refreshed only at startup,
+/// so a session left running past that hour sent an expired JWT on every
+/// authenticated call and the Edge Function replied `401 Invalid JWT` until the
+/// app was restarted. Routing every authenticated call through this helper keeps
+/// the token fresh transparently. A refreshed session is persisted to disk and
+/// state; a failed refresh clears the session so the UI can prompt a re-login.
+///
+/// Care: we snapshot the session and drop every lock/`State` guard before the
+/// `.await`, then re-acquire state afterwards — never holding a lock across it.
+pub async fn ensure_valid_token(app: &AppHandle) -> Option<String> {
+    let (session, client) = {
+        let state = app.try_state::<AppState>()?;
+        let session = state.auth_session.lock().unwrap().as_ref().cloned()?;
+        (session, state.http_client.clone())
+    };
+
+    if !auth::is_expired(&session) {
+        return Some(session.access_token);
+    }
+
+    let auth_path = app.path().app_config_dir().ok().map(|d| d.join("auth.json"));
+
+    match auth::refresh_session(&client, session).await {
+        Ok(refreshed) => {
+            if let Some(ref path) = auth_path {
+                let _ = auth::save_session(&refreshed, path);
+            }
+            let token = refreshed.access_token.clone();
+            if let Some(state) = app.try_state::<AppState>() {
+                *state.auth_session.lock().unwrap() = Some(refreshed);
+            }
+            Some(token)
+        }
+        Err(_) => {
+            if let Some(ref path) = auth_path {
+                auth::clear_session(path);
+            }
+            if let Some(state) = app.try_state::<AppState>() {
+                *state.auth_session.lock().unwrap() = None;
+            }
+            None
+        }
+    }
 }
 
 pub fn show_settings(app: &AppHandle) {
@@ -240,9 +294,35 @@ fn on_hotkey(app: &AppHandle) {
     });
 }
 
+/// RAII guard that clears `AppState::is_rewriting` on drop, guaranteeing the
+/// whole-rewrite in-flight flag is released on EVERY exit path of the
+/// super-hotkey async task (early returns and the success path alike).
+struct RewriteGuard {
+    app: AppHandle,
+}
+
+impl Drop for RewriteGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.app.try_state::<AppState>() {
+            state.is_rewriting.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 fn on_super_hotkey(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
+
+    // Whole-rewrite in-flight guard: a second concurrent super-hotkey press
+    // while a rewrite is running is dropped silently. Set this BEFORE
+    // `show_processing` so the second press shows nothing.
+    if state.is_rewriting.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
     if state.is_capturing.swap(true, Ordering::SeqCst) {
+        // A capture (from either hotkey) is already in flight; release the
+        // rewrite reservation we just took before bailing.
+        state.is_rewriting.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -250,6 +330,10 @@ fn on_super_hotkey(app: &AppHandle) {
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Resets `is_rewriting` on drop — covers ALL returns below plus the
+        // success path at the end of this async block.
+        let _rewrite_guard = RewriteGuard { app: app.clone() };
+
         let capture_result = tokio::task::spawn_blocking(clipboard::capture_selection).await;
 
         let Some(state) = app.try_state::<AppState>() else {
@@ -258,12 +342,9 @@ fn on_super_hotkey(app: &AppHandle) {
         };
         state.is_capturing.store(false, Ordering::SeqCst);
 
-        // Require auth
-        let access_token = {
-            let guard = state.auth_session.lock().unwrap();
-            guard.as_ref().map(|s| s.access_token.clone())
-        };
-        let Some(access_token) = access_token else {
+        // Require auth — refresh the token on demand if it has expired, so a
+        // long-running session doesn't send a stale JWT and get a 401.
+        let Some(access_token) = ensure_valid_token(&app).await else {
             hide_processing(&app);
             return;
         };
@@ -395,6 +476,7 @@ pub fn run() {
             history: Mutex::new(history::HistoryStore::default()),
             http_client: reqwest::Client::new(),
             is_capturing: AtomicBool::new(false),
+            is_rewriting: AtomicBool::new(false),
             auth_session: Mutex::new(None),
             subscription: Mutex::new(auth::SubscriptionCache::default()),
         })
@@ -464,14 +546,9 @@ pub fn run() {
                     interval.tick().await; // skip the immediate tick
                     loop {
                         interval.tick().await;
-                        let Some(state) = app_handle.try_state::<AppState>() else { break };
-                        let token = state
-                            .auth_session
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .map(|s| s.access_token.clone());
-                        if let Some(token) = token {
+                        if app_handle.try_state::<AppState>().is_none() { break }
+                        if let Some(token) = ensure_valid_token(&app_handle).await {
+                            let Some(state) = app_handle.try_state::<AppState>() else { break };
                             if let Ok(sub) =
                                 auth::sync_subscription(&state.http_client, &token).await
                             {
