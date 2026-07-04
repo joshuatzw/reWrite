@@ -326,7 +326,7 @@ function Sidebar({ active, setActive, authState }: { active: ActiveView; setActi
             <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
           </div>
         </div>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version 0.1.2</div>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version 1.0.0</div>
       </div>
     </aside>
   );
