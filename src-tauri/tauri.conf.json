@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "reWrite",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.joshuatan.rewrite",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,7 +26,7 @@
       "endpoints": [
         "https://github.com/joshuatzw/reWrite/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzNjI3NUFFQzQzQjQ4MUQKUldRZFNEdkVyblZpSThFcEJkelRFK0pubzRUdzBrQmNOcUhGSGl5QjZwblFYUm5EdE1yUFQ4U3cK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY1NDRFQzkyQzQwRTlGNDMKUldSRG53N0VrdXhFWlV3WHd6bWJWVmRXd01tWjZGa0pmNWV2M0JxeVZHUWFEdzh0TTFBbFIwd0QK"
     }
   },
   "bundle": {
