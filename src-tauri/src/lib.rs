@@ -577,7 +577,18 @@ pub fn run() {
         .setup(|app| {
             // ── Load config, skills, history ──────────────────────────────────
             let config_path = app.path().app_config_dir()?.join("config.toml");
+            // Absence of config.toml means this is the very first launch after
+            // install, since `save` (triggered by any settings change) always
+            // writes it. Used below to greet the user with the Settings window
+            // so they know reWrite is running.
+            let is_first_run = !config_path.exists();
             let loaded_config = config::load(&config_path);
+            if is_first_run {
+                // Write the file now so the Settings-on-launch greeting only
+                // ever fires once, even if the user closes Settings without
+                // changing anything.
+                let _ = config::save(&loaded_config, &config_path);
+            }
             let hotkey = loaded_config.hotkey.clone();
             let super_hotkey = loaded_config.super_hotkey.clone();
             *app.state::<AppState>().config.lock().unwrap() = loaded_config;
@@ -841,7 +852,7 @@ pub fn run() {
             };
 
             TrayIconBuilder::new()
-                .icon(tauri::include_image!("icons/32x32.png"))
+                .icon(tauri::include_image!("icons/rewrite_logo_taskbar.png"))
                 .menu(&menu)
                 .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -850,6 +861,11 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // ── First run: open Settings so the user knows reWrite is running ──
+            if is_first_run {
+                show_settings(app.handle());
+            }
 
             Ok(())
         })

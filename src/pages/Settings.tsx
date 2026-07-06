@@ -437,6 +437,16 @@ function HomeView({ history, skillsConfig, config, authState }: { history: Histo
           </div>
         </div>
       </div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 28, fontSize: 13, color: "#9a9da3" }}>
+        <span>reWrite lives in your taskbar — when you need it, fire up</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          {hotkeyParts(config.hotkey).map((k, i) => (
+            <kbd key={i} style={{ fontFamily: "'Hanken Grotesk', sans-serif", fontSize: 11.5, fontWeight: 600, color: "#5b5e66", background: "#f3f4f5", border: "1px solid #e2e3e6", borderBottomWidth: 2, borderRadius: 6, padding: "3px 7px" }}>{k}</kbd>
+          ))}
+        </div>
+        <span>or click the taskbar icon.</span>
+      </div>
     </div>
   );
 }
