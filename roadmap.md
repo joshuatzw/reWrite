@@ -234,7 +234,7 @@ Here is
 
 
 **BUGS:**
-
+[ ] Change the supabase Auth sign in link - laymen won't know.
 
 **Security and Abuse**
 
