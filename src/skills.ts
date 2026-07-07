@@ -1,3 +1,5 @@
+import type { SkillsConfig } from "./types";
+
 export interface BuiltinSkill {
   id: string;
   name: string;
@@ -26,3 +28,34 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     description: "Writing feels too thin? Beefs up your email, proposal, or summary so it's polished and ready to go.",
   },
 ];
+
+export interface SkillItem {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export function buildItems(cfg: SkillsConfig): SkillItem[] {
+  const builtins = BUILTIN_SKILLS.filter((b) => cfg.builtin_enabled?.[b.id] !== false);
+
+  const enabled = [...cfg.skills]
+    .filter((s) => s.enabled)
+    .sort((a, b) => a.order - b.order);
+
+  const customItems = enabled.map((s) => {
+    let description = s.instructions.trim();
+    if (!description) {
+      if (s.base_skill_id) {
+        const baseName =
+          BUILTIN_SKILLS.find((b) => b.id === s.base_skill_id)?.name ??
+          enabled.find((b) => b.id === s.base_skill_id)?.name;
+        description = baseName ? `Based on ${baseName}` : "No additional instructions.";
+      } else {
+        description = "No additional instructions.";
+      }
+    }
+    return { id: s.id, name: s.name, description };
+  });
+
+  return [...builtins, ...customItems];
+}

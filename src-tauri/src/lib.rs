@@ -1,11 +1,11 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Listener, Manager, PhysicalPosition,
+    AppHandle, Emitter, Listener, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
 };
 
 pub mod auth;
@@ -19,6 +19,31 @@ pub mod secure_store;
 pub mod skills;
 #[cfg(target_os = "windows")]
 pub mod esc_hook;
+#[cfg(target_os = "windows")]
+pub mod selection_watcher;
+
+/// Visible size (logical px) of the bubble ring drawn in Bubble.tsx. Kept in
+/// sync with that component's own hardcoded size.
+const BUBBLE_VISIBLE_SIZE: f64 = 20.0;
+
+/// Extra invisible margin (logical px) added on each side of the bubble
+/// window beyond the visible ring (see Bubble.tsx), to make the actual click
+/// target more forgiving than the visible dot alone. See `show_bubble` and
+/// the bubble window pre-warm block for how this is applied.
+const BUBBLE_HIT_PADDING: f64 = 10.0;
+
+const BUBBLE_MENU_WIDTH: f64 = 168.0;
+const BUBBLE_MENU_HEIGHT: f64 = 180.0;
+const BUBBLE_MENU_CLOSE_SUPPRESS_MS: u64 = 500;
+const BUBBLE_MENU_OPEN_CLICK_GRACE_MS: u64 = 350;
+pub const BUBBLE_MENU_PARKED_X: f64 = -32000.0;
+pub const BUBBLE_MENU_PARKED_Y: f64 = -32000.0;
+static BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn is_bubble_menu_parked(x: i32, y: i32) -> bool {
+    (x - BUBBLE_MENU_PARKED_X as i32).abs() < 100 && (y - BUBBLE_MENU_PARKED_Y as i32).abs() < 100
+}
 
 // ── Temporary diagnostics (overlay first-open hang) ─────────────────────────
 // Timestamped, thread-tagged tracing to pinpoint where the main event loop
@@ -145,6 +170,242 @@ pub fn hide_processing(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("processing") {
         let _ = w.hide();
     }
+}
+
+/// Clamp `(x, y)` (physical screen coordinates) so `window`, at its current
+/// physical size, stays fully within the work area of whichever monitor
+/// contains that point. Without this, a multi-monitor setup — or a selection
+/// anchor near a monitor's right/bottom edge — can leave the tiny bubble (or
+/// the larger bubble menu) partially or fully off-screen. Reads the window's
+/// actual current size via the window handle rather than hard-coding the
+/// pre-warmed logical sizes, sidestepping any logical/physical DPI-scaling
+/// mismatch with the physical `(x, y)` we're clamping.
+///
+/// Uses `MonitorFromPoint`/`GetMonitorInfoW` from the `windows` crate, same as
+/// `selection_watcher.rs`'s `is_foreground_fullscreen_exclusive` (just fed a
+/// point instead of a window handle) — no new Cargo.toml dependency needed.
+#[cfg(target_os = "windows")]
+fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let pt = POINT { x: x as i32, y: y as i32 };
+    let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }.ok().is_err() {
+        // No monitor info available — fall back to the raw, unclamped point
+        // rather than guessing.
+        return (x, y);
+    }
+
+    let work = info.rcWork;
+    let min_x = work.left as f64;
+    let max_x = (work.right as f64 - w).max(min_x);
+    let min_y = work.top as f64;
+    let max_y = (work.bottom as f64 - h).max(min_y);
+
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+#[cfg(target_os = "windows")]
+fn clamp_to_monitor(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
+    let (w, h) = window
+        .outer_size()
+        .map(|s| (s.width as f64, s.height as f64))
+        .unwrap_or((0.0, 0.0));
+    clamp_rect_to_monitor(x, y, w, h)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clamp_rect_to_monitor(x: f64, y: f64, _w: f64, _h: f64) -> (f64, f64) {
+    (x, y)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clamp_to_monitor(_window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
+    (x, y)
+}
+
+/// Show the selection bubble near `(x, y)` (physical screen coordinates from
+/// the `selection:detected` event payload). Marshaled onto the main thread
+/// like every other window show/hide/position call in this file — see the
+/// comment on `show_overlay` for why that's not optional.
+pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("bubble") {
+            // The window is deliberately larger than the visible 16x16 ring
+            // (see BUBBLE_HIT_PADDING / Bubble.tsx) so the actual clickable
+            // area is more forgiving than the tiny visible dot — a live trace
+            // session showed clicks aimed at the old 16x16 target routinely
+            // missing it entirely (the click landed on the source app instead,
+            // which silently cleared the selection, and `bubble_clicked` never
+            // fired). Shift back by half the padding so the visible dot still
+            // lands at the same anchor point as before.
+            let (x, y) = clamp_to_monitor(&w, x - BUBBLE_HIT_PADDING, y - BUBBLE_HIT_PADDING);
+            let _ = w.set_position(PhysicalPosition::new(x, y));
+            // Re-toggling always-on-top moves the window to the very top of
+            // the topmost band, ahead of any other always-on-top window (some
+            // chat/call apps run topmost themselves) that could otherwise
+            // render over our bubble and make it appear not to respond to
+            // clicks. See the same trick in show_bubble_menu.
+            let _ = w.set_always_on_top(false);
+            let _ = w.set_always_on_top(true);
+            let show_result = w.show();
+            trace(&format!("show_bubble: at ({x}, {y}) show={:?}", show_result.is_ok()));
+        } else {
+            trace("show_bubble: bubble window not found");
+        }
+    });
+}
+
+pub fn hide_bubble(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("bubble") {
+            let _ = w.hide();
+            trace("hide_bubble: hidden");
+        }
+    });
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn bubble_menu_probe_suppressed() -> bool {
+    now_ms() < BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS.load(Ordering::SeqCst)
+}
+
+fn suppress_bubble_menu_probe() {
+    BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS.store(
+        now_ms() + BUBBLE_MENU_CLOSE_SUPPRESS_MS,
+        Ordering::SeqCst,
+    );
+}
+
+fn suppress_bubble_menu_outside_click() {
+    BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS.store(
+        now_ms() + BUBBLE_MENU_OPEN_CLICK_GRACE_MS,
+        Ordering::SeqCst,
+    );
+}
+
+fn bubble_menu_outside_click_suppressed() -> bool {
+    now_ms() < BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS.load(Ordering::SeqCst)
+}
+
+/// Show the bubble's skill menu near `(x, y)`, offset slightly so it doesn't
+/// sit exactly on top of the bubble icon that was just clicked.
+///
+/// The menu webview is prebuilt at startup. Building or reloading a WebView
+/// from this click path can stall or briefly paint transparent on Windows, so
+/// showing means resetting the existing React tree by event and moving it
+/// on-screen.
+pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        trace("show_bubble_menu: on main thread");
+        // The global mouse hook sees the same WM_LBUTTONUP that clicked the
+        // bubble. Depending on main-thread queue ordering, its outside-click
+        // task can run just after this fresh menu is built and otherwise
+        // destroy it as an "outside" click before the user ever sees it.
+        suppress_bubble_menu_outside_click();
+
+        let (x, y) = clamp_rect_to_monitor(
+            x + 8.0,
+            y + 8.0,
+            BUBBLE_MENU_WIDTH,
+            BUBBLE_MENU_HEIGHT,
+        );
+
+        if let Some(w) = handle.get_webview_window("bubble_menu") {
+            let _ = w.set_size(LogicalSize::new(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT));
+            let _ = w.set_position(PhysicalPosition::new(x, y));
+            let emit_result = w.emit("bubble-menu:show", ());
+            let _ = w.set_always_on_top(false);
+            let _ = w.set_always_on_top(true);
+            let show_result = w.show();
+            let focus_result = w.set_focus();
+            trace(&format!(
+                "show_bubble_menu: shown at ({x}, {y}) emit={:?} show={:?} focus={:?}",
+                emit_result.is_ok(),
+                show_result.is_ok(),
+                focus_result.is_ok(),
+            ));
+        } else {
+            trace("show_bubble_menu: bubble_menu window not found");
+        }
+    });
+}
+
+pub fn hide_bubble_menu(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        suppress_bubble_menu_probe();
+        if let Some(w) = handle.get_webview_window("bubble_menu") {
+            let _ = w.emit("bubble-menu:reset", ());
+            let _ = w.set_position(PhysicalPosition::new(
+                BUBBLE_MENU_PARKED_X,
+                BUBBLE_MENU_PARKED_Y,
+            ));
+            trace("hide_bubble_menu: reset emitted and parked window");
+        }
+    });
+}
+
+/// If the bubble menu is currently open and `(x, y)` (physical screen coords
+/// of a click, from the low-level mouse hook in `selection_watcher.rs`) falls
+/// outside its window bounds, closes it. This is the primary "click outside
+/// closes the menu" mechanism — driven directly off the same global mouse
+/// hook that already handles selection detection, rather than the WebView2
+/// focus/blur events `BubbleMenu.tsx` also listens for, since those have
+/// proven unreliable cross-app (a window's OS focus state on Windows can lag
+/// or fail to transfer depending on how it was shown). All window queries run
+/// on the main thread, like every other window operation in this file.
+#[cfg(target_os = "windows")]
+pub fn maybe_close_bubble_menu_on_outside_click(app: &AppHandle, x: i32, y: i32) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(w) = handle.get_webview_window("bubble_menu") else {
+            return;
+        };
+        let Ok(cur_pos) = w.outer_position() else {
+            return;
+        };
+        if is_bubble_menu_parked(cur_pos.x, cur_pos.y) {
+            return;
+        }
+        if bubble_menu_outside_click_suppressed() {
+            trace("maybe_close_bubble_menu_on_outside_click: skipped, opening click grace");
+            return;
+        }
+        let inside = match w.outer_size() {
+            Ok(size) => {
+                x >= cur_pos.x
+                    && x <= cur_pos.x + size.width as i32
+                    && y >= cur_pos.y
+                    && y <= cur_pos.y + size.height as i32
+            }
+            // Bounds unknowable — don't close on a guess.
+            Err(_) => true,
+        };
+        if !inside {
+            trace("maybe_close_bubble_menu_on_outside_click: click outside, closing");
+            // Delegate to hide_bubble_menu so every close parks/resets the
+            // webview and arms the same short re-probe suppression.
+            hide_bubble_menu(&handle);
+        }
+    });
 }
 
 /// Whether a rewrite error corresponds to the user exhausting their free
@@ -591,6 +852,7 @@ pub fn run() {
             }
             let hotkey = loaded_config.hotkey.clone();
             let super_hotkey = loaded_config.super_hotkey.clone();
+            let bubble_enabled = loaded_config.bubble_enabled;
             *app.state::<AppState>().config.lock().unwrap() = loaded_config;
 
             let skills_path = app.path().app_config_dir()?.join("skills.json");
@@ -713,6 +975,16 @@ pub fn run() {
                 }
             }
 
+            // ── Selection watcher ────────────────────────────────────────────
+            // Background service for v1.1.0's selection bubble (see
+            // selection_watcher.rs) — on by default, but user-toggleable via
+            // Settings (Sprint 4's `bubble_enabled` config flag) for RTS-style
+            // click-drag games / users who find the popup intrusive.
+            #[cfg(target_os = "windows")]
+            if bubble_enabled {
+                selection_watcher::start(app.handle());
+            }
+
             // ── Pre-warm overlay ──────────────────────────────────────────────
             if let Ok(overlay) = tauri::WebviewWindowBuilder::new(
                 app.handle(),
@@ -807,6 +1079,95 @@ pub fn run() {
                 });
             }
 
+            // ── Pre-warm selection bubble ──────────────────────────────────────
+            // The visible ring is only BUBBLE_VISIBLE_SIZE (Bubble.tsx), but the
+            // window itself is BUBBLE_HIT_PADDING larger on each side — a live
+            // trace session showed clicks aimed at a window sized to match the
+            // visible dot routinely missing it outright (landing on the source
+            // app instead, which silently cleared the selection before
+            // `bubble_clicked` ever fired). The extra window space is invisible
+            // (transparent) but still clickable, giving a much more forgiving
+            // hit target without changing how big the dot looks.
+            if let Ok(bubble) = tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "bubble",
+                tauri::WebviewUrl::App("".into()),
+            )
+            .title("")
+            .decorations(false)
+            .shadow(false)
+            .always_on_top(true)
+            .transparent(true)
+            .skip_taskbar(true)
+            .inner_size(
+                BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
+                BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
+            )
+            .focused(false)
+            .visible(false)
+            .build()
+            {
+                let bubble_ref = bubble.clone();
+                bubble.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = bubble_ref.hide();
+                    }
+                });
+            }
+
+            // ── Pre-warm bubble menu ───────────────────────────────────────────
+            // Build this WebView at startup. Creating a fresh WebView from the
+            // bubble click path can stall on Windows; keeping this prebuilt
+            // one alive and resetting it by event gives us fresh state without
+            // constructing or reloading a window during the interaction.
+            if let Ok(bubble_menu) = tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "bubble_menu",
+                tauri::WebviewUrl::App("".into()),
+            )
+            .title("")
+            .decorations(false)
+            .shadow(false)
+            .always_on_top(true)
+            .transparent(true)
+            .skip_taskbar(true)
+            .inner_size(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT)
+            .position(BUBBLE_MENU_PARKED_X, BUBBLE_MENU_PARKED_Y)
+            .focused(false)
+            .visible(true)
+            .build()
+            {
+                let app_handle = app.handle().clone();
+                bubble_menu.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        hide_bubble_menu(&app_handle);
+                    }
+                });
+            }
+
+            // ── Selection watcher listeners ────────────────────────────────────
+            // Always-on background service (see selection_watcher.rs) emits these
+            // two events from its own worker thread; react by showing/hiding the
+            // bubble. Registered once, for the app's lifetime.
+            #[cfg(target_os = "windows")]
+            {
+                let app_handle = app.handle().clone();
+                app.listen("selection:detected", move |event| {
+                    if let Ok(payload) =
+                        serde_json::from_str::<selection_watcher::AnchorPayload>(event.payload())
+                    {
+                        show_bubble(&app_handle, payload.x, payload.y);
+                    }
+                });
+
+                let app_handle = app.handle().clone();
+                app.listen("selection:cleared", move |_event| {
+                    hide_bubble(&app_handle);
+                });
+            }
+
             // ── Pre-warm settings ─────────────────────────────────────────────
             // Build the (large, webview-heavy) Settings window once, hidden, so
             // that opening it later is a cheap show()/set_focus(). Building it on
@@ -893,6 +1254,9 @@ pub fn run() {
             commands::open_checkout,
             commands::open_billing_portal,
             commands::refresh_subscription,
+            commands::bubble_clicked,
+            commands::close_bubble_menu,
+            commands::debug_trace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

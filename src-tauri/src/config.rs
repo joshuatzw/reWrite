@@ -10,6 +10,7 @@ fn default_restore_clipboard() -> bool { true }
 fn default_restore_delay_ms() -> u64 { 500 }
 fn default_paste_delay_ms() -> u64 { 400 }
 fn default_default_skill_id() -> String { "__proofread__".to_string() }
+fn default_bubble_enabled() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -27,6 +28,8 @@ pub struct Config {
     pub paste_delay_ms: u64,
     #[serde(default = "default_default_skill_id")]
     pub default_skill_id: String,
+    #[serde(default = "default_bubble_enabled")]
+    pub bubble_enabled: bool,
 }
 
 impl Default for Config {
@@ -39,6 +42,7 @@ impl Default for Config {
             restore_delay_ms: default_restore_delay_ms(),
             paste_delay_ms: default_paste_delay_ms(),
             default_skill_id: default_default_skill_id(),
+            bubble_enabled: default_bubble_enabled(),
         }
     }
 }

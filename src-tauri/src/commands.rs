@@ -62,7 +62,18 @@ pub async fn paste_text(
         (original, cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms, format)
     };
 
-    window.hide().map_err(|e| e.to_string())?;
+    // bubble_menu is prewarmed and parked/reset instead of hidden, so a
+    // successful paste must go through the same close path as dismissals.
+    // Every other caller (Overlay) still gets a real hide.
+    if window.label() == "bubble_menu" {
+        crate::hide_bubble_menu(window.app_handle());
+        #[cfg(target_os = "windows")]
+        {
+            crate::selection_watcher::focus_last_source_window();
+        }
+    } else {
+        window.hide().map_err(|e| e.to_string())?;
+    }
     tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
 
     tokio::task::spawn_blocking(move || match format {
@@ -158,8 +169,30 @@ pub fn save_config(
         .map_err(|e| e.to_string())?
         .join("config.toml");
 
+    // Detect a bubble_enabled flip before overwriting stored state, so the
+    // watcher can be started/stopped live — mirrors how `update_hotkey` /
+    // `update_super_hotkey` re-register the global shortcut on change.
+    let bubble_enabled_changed = {
+        let prev = lock(&state.config)?;
+        prev.bubble_enabled != config.bubble_enabled
+    };
+    #[cfg(target_os = "windows")]
+    let bubble_enabled = config.bubble_enabled;
+
     crate::config::save(&config, &path).map_err(|e| e.to_string())?;
     *lock(&state.config)? = config;
+
+    #[cfg(target_os = "windows")]
+    if bubble_enabled_changed {
+        if bubble_enabled {
+            crate::selection_watcher::start(&app);
+        } else {
+            crate::selection_watcher::stop();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = bubble_enabled_changed;
+
     Ok(())
 }
 
@@ -180,6 +213,61 @@ pub fn close_overlay(app: AppHandle) {
         #[cfg(target_os = "windows")]
         crate::esc_hook::stop();
     });
+}
+
+// ── Selection bubble commands ─────────────────────────────────────────────────
+
+// Takes no arguments from the frontend on purpose: Bubble.tsx used to pass the
+// text/x/y it captured from its own `selection:detected` listener, but a live
+// trace session showed that listener can still be empty by the time a (fast)
+// human click arrives — event delivery into a webview that was hidden a
+// moment earlier isn't instant, and the click can beat it, silently no-opping
+// the whole bubble. Reading the anchor straight from `selection_watcher`'s own
+// last-known state (the same Rust-side data the event was built from)
+// sidesteps that race entirely.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn bubble_clicked(state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let anchor = crate::selection_watcher::last_anchor()
+        .ok_or_else(|| "No active selection.".to_string())?;
+    crate::trace(&format!(
+        "bubble_clicked: enter, {} chars at ({}, {})",
+        anchor.text.len(),
+        anchor.x,
+        anchor.y
+    ));
+    // Passive read only — no synthetic Ctrl+C. `anchor.text` already came from
+    // the selection watcher's UIA probe, so we never need to re-copy from the
+    // source window, which is what makes it safe to call this after focus may
+    // have already shifted to our own bubble window.
+    let snapshot = crate::clipboard::snapshot_clipboard().unwrap_or_default();
+    *lock(&state.captured_text)? = Some(anchor.text);
+    *lock(&state.original_clipboard)? = Some(snapshot);
+
+    crate::hide_bubble(&app);
+    crate::show_bubble_menu(&app, anchor.x, anchor.y);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub fn bubble_clicked(_state: State<AppState>, _app: AppHandle) -> Result<(), String> {
+    Err("Selection bubble is only supported on Windows.".to_string())
+}
+
+#[tauri::command]
+pub fn close_bubble_menu(app: AppHandle) {
+    crate::trace("close_bubble_menu: invoked from frontend");
+    crate::hide_bubble_menu(&app);
+}
+
+/// Temporary diagnostic for the stuck-error-state investigation: lets
+/// BubbleMenu.tsx surface a line in the same `crate::trace` terminal output
+/// Rust-side events use, so we can see exactly which reset trigger (if any)
+/// fires and when, relative to hide/show. Remove once resolved.
+#[tauri::command]
+pub fn debug_trace(msg: String) {
+    crate::trace(&format!("frontend: {msg}"));
 }
 
 #[tauri::command]
