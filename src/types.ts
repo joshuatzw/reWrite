@@ -21,6 +21,7 @@ export interface Config {
   restore_clipboard: boolean;
   restore_delay_ms: number;
   paste_delay_ms: number;
+  bubble_enabled: boolean;
 }
 
 export interface HistoryEntry {

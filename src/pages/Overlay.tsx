@@ -3,40 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { SkillsConfig } from "../types";
-import { BUILTIN_SKILLS } from "../skills";
+import { buildItems, type SkillItem } from "../skills";
 
 type Status = "idle" | "loading" | "error";
-
-interface SkillItem {
-  id: string;
-  name: string;
-  description: string;
-}
-
-function buildItems(cfg: SkillsConfig): SkillItem[] {
-  const builtins = BUILTIN_SKILLS.filter((b) => cfg.builtin_enabled?.[b.id] !== false);
-
-  const enabled = [...cfg.skills]
-    .filter((s) => s.enabled)
-    .sort((a, b) => a.order - b.order);
-
-  const customItems = enabled.map((s) => {
-    let description = s.instructions.trim();
-    if (!description) {
-      if (s.base_skill_id) {
-        const baseName =
-          BUILTIN_SKILLS.find((b) => b.id === s.base_skill_id)?.name ??
-          enabled.find((b) => b.id === s.base_skill_id)?.name;
-        description = baseName ? `Based on ${baseName}` : "No additional instructions.";
-      } else {
-        description = "No additional instructions.";
-      }
-    }
-    return { id: s.id, name: s.name, description };
-  });
-
-  return [...builtins, ...customItems];
-}
 
 const EMPTY_SKILL_ITEMS = buildItems({ global_instructions: "", skills: [], builtin_enabled: {} });
 

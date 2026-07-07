@@ -3484,6 +3484,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "toml 0.8.2",
+ "windows 0.61.3",
  "windows-sys 0.52.0",
 ]
 

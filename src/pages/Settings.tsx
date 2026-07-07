@@ -879,6 +879,15 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
   const [startup, setStartup] = useState(true);
   const [sounds, setSounds] = useState(false);
 
+  // Bubble toggle: unlike the other rows above (each with a dedicated
+  // command), there's no `update_bubble_enabled` command — this is the first
+  // Settings row to save an arbitrary field via the generic `save_config`.
+  // Keep the last-fetched full Config around so the save always round-trips
+  // every field, not just this one.
+  const [bubbleEnabled, setBubbleEnabled] = useState(true);
+  const [fullConfig, setFullConfig] = useState<Config | null>(null);
+  const [bubbleError, setBubbleError] = useState<string | null>(null);
+
   const [appVersion, setAppVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "up-to-date" | "downloading" | "ready" | "error">("idle");
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -891,6 +900,8 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
       setHotkey(cfg.hotkey);
       setSuperHotkey(cfg.super_hotkey);
       setDefaultSkillId(cfg.default_skill_id);
+      setBubbleEnabled(cfg.bubble_enabled);
+      setFullConfig(cfg);
     });
     invoke<SkillsConfig>("get_skills_config").then(setSkillsConfig);
     getVersion().then(setAppVersion);
@@ -951,6 +962,19 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
       setSuperHotkeyError(String(err));
     } finally {
       setSuperHotkeySaving(false);
+    }
+  }
+
+  async function handleToggleBubble() {
+    if (!fullConfig) return;
+    const newEnabled = !bubbleEnabled;
+    const updated = { ...fullConfig, bubble_enabled: newEnabled };
+    setBubbleEnabled(newEnabled);
+    setFullConfig(updated);
+    try {
+      await invoke("save_config", { config: updated });
+    } catch (err) {
+      setBubbleError(String(err));
     }
   }
 
@@ -1121,6 +1145,14 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           />
           {divider}
 
+          <PrefRow
+            label="Selection bubble"
+            sub="Show a quick-rewrite bubble near text you highlight"
+            right={<Toggle on={bubbleEnabled} onToggle={handleToggleBubble} />}
+          />
+          {bubbleError && <div style={{ fontSize: 12, color: "#c0392b", marginTop: -10, marginBottom: 10 }}>{bubbleError}</div>}
+          {divider}
+
           <PrefRow label="Launch on startup" sub="Open reWrite when you sign in" right={<Toggle on={startup} onToggle={() => setStartup((s) => !s)} />} />
           {divider}
           <PrefRow label="Sound on rewrite" sub="Play a chime when text is ready" right={<Toggle on={sounds} onToggle={() => setSounds((s) => !s)} />} />
@@ -1158,7 +1190,7 @@ export default function Settings() {
   const [active, setActive] = useState<ActiveView>("home");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
-  const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400 });
+  const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400, bubble_enabled: true });
   const [authState, setAuthState] = useState<AuthState | null>(null);
 
   async function loadAuthState() {

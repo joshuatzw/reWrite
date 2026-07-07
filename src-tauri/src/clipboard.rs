@@ -91,6 +91,15 @@ pub fn capture_selection() -> Result<(String, String)> {
     Ok((captured, original))
 }
 
+/// Passively read the current clipboard contents — no synthetic Ctrl+C, no
+/// focus required. Used by the selection bubble's click handler to snapshot
+/// "what was on the clipboard before we touch it", since simulating a copy
+/// there would risk racing the click's own focus change (see selection_watcher
+/// module docs / the design note in lib.rs for why the bubble never re-copies).
+pub fn snapshot_clipboard() -> Result<String> {
+    Ok(Clipboard::new()?.get_text().unwrap_or_default())
+}
+
 /// Write result to clipboard, simulate Ctrl+V, then optionally restore the original.
 pub fn paste_and_restore(
     result: &str,
