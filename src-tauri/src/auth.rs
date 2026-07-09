@@ -78,9 +78,14 @@ struct RefreshResponse {
     expires_in: Option<i64>,
 }
 
-pub async fn refresh_session(client: &reqwest::Client, session: AuthSession) -> Result<AuthSession> {
+pub async fn refresh_session(
+    client: &reqwest::Client,
+    session: AuthSession,
+) -> Result<AuthSession> {
     let resp = client
-        .post(format!("{SUPABASE_URL}/auth/v1/token?grant_type=refresh_token"))
+        .post(format!(
+            "{SUPABASE_URL}/auth/v1/token?grant_type=refresh_token"
+        ))
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({ "refresh_token": session.refresh_token }))
@@ -174,7 +179,8 @@ pub async fn get_user_email(client: &reqwest::Client, access_token: &str) -> Res
         .await?;
 
     let user: UserResponse = resp.json().await?;
-    user.email.ok_or_else(|| anyhow!("No email in user response"))
+    user.email
+        .ok_or_else(|| anyhow!("No email in user response"))
 }
 
 // ── Checkout / portal ─────────────────────────────────────────────────────────
@@ -190,7 +196,9 @@ pub async fn create_checkout_url(
     }
 
     let resp = client
-        .post(format!("{SUPABASE_URL}/functions/v1/create-checkout-session"))
+        .post(format!(
+            "{SUPABASE_URL}/functions/v1/create-checkout-session"
+        ))
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({ "plan": plan }))
@@ -250,8 +258,7 @@ pub fn parse_auth_url(url: &str) -> Option<(String, String, i64)> {
         }
     }
 
-    let expires_at =
-        expires_at.unwrap_or_else(|| now_secs() + expires_in.unwrap_or(3600));
+    let expires_at = expires_at.unwrap_or_else(|| now_secs() + expires_in.unwrap_or(3600));
 
     Some((access_token?, refresh_token?, expires_at))
 }

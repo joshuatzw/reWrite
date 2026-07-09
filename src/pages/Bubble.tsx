@@ -35,7 +35,7 @@ export default function Bubble() {
           dark editor themes (e.g. VS Code) where the original near-black dot
           was invisible, and recognizable as this app's own affordance rather
           than a generic dot. */}
-      <div style={{ position: "relative", width: 20, height: 20 }}>
+      <div style={{ position: "relative", width: 30, height: 30 }}>
         <div
           style={{
             position: "absolute",
@@ -49,7 +49,7 @@ export default function Bubble() {
         <div
           style={{
             position: "absolute",
-            inset: 2.5,
+            inset: 3.75,
             borderRadius: "50%",
             background: "#ffffff",
             boxShadow: "0 0 3px 1px rgba(0,0,0,0.25)",
@@ -58,7 +58,7 @@ export default function Bubble() {
             justifyContent: "center",
           }}
         >
-          <img src={logoBlack} alt="" style={{ width: 10, height: "auto", userSelect: "none", pointerEvents: "none" }} />
+          <img src={logoBlack} alt="" style={{ width: 15, height: "auto", userSelect: "none", pointerEvents: "none" }} />
         </div>
       </div>
     </div>

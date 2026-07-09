@@ -16,14 +16,14 @@
 //! creative apps).
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering},
     mpsc, Mutex, OnceLock,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 use windows::core::Result as WinResult;
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
@@ -35,7 +35,7 @@ use windows::Win32::System::Ole::{
     SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern, UIA_TextPatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, IsWindow, SetForegroundWindow,
@@ -43,10 +43,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, MSLLHOOKSTRUCT, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_KEYUP, WM_LBUTTONUP, WM_QUIT, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 
 /// Selections shorter than this (after trimming whitespace) are treated as
@@ -93,6 +95,10 @@ pub struct AnchorPayload {
 /// instead sidesteps that race entirely.
 static LAST_ANCHOR: Mutex<Option<AnchorPayload>> = Mutex::new(None);
 static LAST_SOURCE_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAST_MOUSE_DOWN_X: AtomicI32 = AtomicI32::new(0);
+static LAST_MOUSE_DOWN_Y: AtomicI32 = AtomicI32::new(0);
+static LAST_MOUSE_UP_X: AtomicI32 = AtomicI32::new(0);
+static LAST_MOUSE_UP_Y: AtomicI32 = AtomicI32::new(0);
 
 pub fn last_anchor() -> Option<AnchorPayload> {
     LAST_ANCHOR.lock().unwrap().clone()
@@ -185,11 +191,38 @@ fn run_hook_thread() {
 /// another process, unlike the UIA probe, so it's fine to dispatch (onto the
 /// main thread) straight from here rather than through the debounced worker.
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && wparam == WM_LBUTTONUP as usize {
-        if let Some(app) = APP.get() {
-            let info = &*(lparam as *const MSLLHOOKSTRUCT);
-            crate::maybe_close_bubble_menu_on_outside_click(app, info.pt.x, info.pt.y);
+    if code >= 0 {
+        let info = &*(lparam as *const MSLLHOOKSTRUCT);
+        if wparam == WM_LBUTTONDOWN as usize {
+            LAST_MOUSE_DOWN_X.store(info.pt.x, Ordering::Relaxed);
+            LAST_MOUSE_DOWN_Y.store(info.pt.y, Ordering::Relaxed);
+        } else if wparam == WM_LBUTTONUP as usize {
+            LAST_MOUSE_UP_X.store(info.pt.x, Ordering::Relaxed);
+            LAST_MOUSE_UP_Y.store(info.pt.y, Ordering::Relaxed);
+
+            let dx = info.pt.x - LAST_MOUSE_DOWN_X.load(Ordering::Relaxed);
+            let dy = info.pt.y - LAST_MOUSE_DOWN_Y.load(Ordering::Relaxed);
+            let was_drag = dx.abs() > 8 || dy.abs() > 8;
+            if let Some(app) = APP.get() {
+                crate::maybe_close_bubble_menu_on_outside_click(
+                    app, info.pt.x, info.pt.y, was_drag,
+                );
+            }
+            if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref() {
+                let _ = tx.send(WorkerMsg::Recheck);
+            }
         }
+    }
+    CallNextHookEx(0, code, wparam, lparam)
+}
+
+/// Catches keyboard-only selection changes that no mouse-up can observe:
+/// Ctrl+A can create a selection when `HAD_SELECTION` is still false, while
+/// Delete/Backspace/typing can clear a known selection with no later mouse
+/// event. Only Ctrl+A bypasses the `HAD_SELECTION` gate; other keyboard
+/// traffic stays cheap during normal typing/gaming.
+unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && should_recheck_for_keyboard_event(wparam, lparam) {
         if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref() {
             let _ = tx.send(WorkerMsg::Recheck);
         }
@@ -197,20 +230,23 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
     CallNextHookEx(0, code, wparam, lparam)
 }
 
-/// Catches the case a mouse-up alone can't: the user deletes (or types over)
-/// the selected text via keyboard, with no further mouse event to trigger a
-/// recheck. Gated on `HAD_SELECTION` so normal typing/gaming — no selection,
-/// hence nothing to lose — never touches the mutex.
-unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0
-        && (wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize)
-        && HAD_SELECTION.load(Ordering::Relaxed)
-    {
-        if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref() {
-            let _ = tx.send(WorkerMsg::Recheck);
+unsafe fn should_recheck_for_keyboard_event(wparam: WPARAM, lparam: LPARAM) -> bool {
+    if wparam == WM_KEYDOWN as usize || wparam == WM_SYSKEYDOWN as usize {
+        let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+        if kb.vkCode == b'A' as u32 && is_ctrl_down_without_alt() {
+            crate::trace("selection_watcher::keyboard_hook_proc: Ctrl+A recheck");
+            return true;
         }
     }
-    CallNextHookEx(0, code, wparam, lparam)
+
+    (wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize)
+        && HAD_SELECTION.load(Ordering::Relaxed)
+}
+
+fn is_ctrl_down_without_alt() -> bool {
+    let ctrl_down = (unsafe { GetAsyncKeyState(VK_CONTROL as i32) } as u16 & 0x8000) != 0;
+    let alt_down = (unsafe { GetAsyncKeyState(VK_MENU as i32) } as u16 & 0x8000) != 0;
+    ctrl_down && !alt_down
 }
 
 fn worker_loop(rx: mpsc::Receiver<WorkerMsg>) {
@@ -281,7 +317,11 @@ fn run_probe_cycle(automation: &IUIAutomation, had_selection: &mut bool) {
     crate::trace(&format!(
         "run_probe_cycle: probe_selection -> {}",
         match &probe_result {
-            Ok(Some((text, rects))) => format!("Some({} chars, {} rects)", text.trim().chars().count(), rects.len()),
+            Ok(Some((text, rects))) => format!(
+                "Some({} chars, {} rects)",
+                text.trim().chars().count(),
+                rects.len()
+            ),
             Ok(None) => "None".to_string(),
             Err(e) => format!("Err({e:?})"),
         }
@@ -304,7 +344,9 @@ fn run_probe_cycle(automation: &IUIAutomation, had_selection: &mut bool) {
                 unsafe { GetForegroundWindow().0 as isize },
                 Ordering::SeqCst,
             );
-            crate::trace(&format!("run_probe_cycle: emitting selection:detected at ({x}, {y})"));
+            crate::trace(&format!(
+                "run_probe_cycle: emitting selection:detected at ({x}, {y})"
+            ));
             if let Some(app) = APP.get() {
                 let _ = app.emit("selection:detected", payload);
             }
@@ -352,14 +394,34 @@ fn selection_anchor(rects: &[(f64, f64, f64, f64)]) -> (f64, f64) {
 fn probe_selection(
     automation: &IUIAutomation,
 ) -> WinResult<Option<(String, Vec<(f64, f64, f64, f64)>)>> {
-    // Any error here (nothing focused, inaccessible tree, ...) means "no
-    // selection" rather than a fatal error — this runs every debounce cycle
-    // against whatever app happens to be foreground.
-    let element = match unsafe { automation.GetFocusedElement() } {
-        Ok(e) => e,
-        Err(_) => return Ok(None),
-    };
+    // Most classic controls expose the selected text on the focused element.
+    if let Ok(element) = unsafe { automation.GetFocusedElement() } {
+        match selection_from_element(&element) {
+            Ok(Some(selection)) => return Ok(Some(selection)),
+            Ok(None) => {}
+            Err(e) => crate::trace(&format!("probe_selection: focused element error: {e:?}")),
+        }
+    }
 
+    // Electron/web chat apps sometimes leave focus on a wrapper while the text
+    // control under the mouse exposes TextPattern. Probe the mouse-up point as
+    // a fallback so apps like Discord/WhatsApp/LINE get a second chance.
+    let point = POINT {
+        x: LAST_MOUSE_UP_X.load(Ordering::Relaxed),
+        y: LAST_MOUSE_UP_Y.load(Ordering::Relaxed),
+    };
+    if point.x != 0 || point.y != 0 {
+        if let Ok(element) = unsafe { automation.ElementFromPoint(point) } {
+            return selection_from_element(&element);
+        }
+    }
+
+    Ok(None)
+}
+
+fn selection_from_element(
+    element: &IUIAutomationElement,
+) -> WinResult<Option<(String, Vec<(f64, f64, f64, f64)>)>> {
     let text_pattern: IUIAutomationTextPattern =
         match unsafe { element.GetCurrentPatternAs(UIA_TextPatternId) } {
             Ok(p) => p,

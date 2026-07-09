@@ -152,7 +152,9 @@ fn probe_selection(
 /// UIA's `GetBoundingRectangles` returns a flat SAFEARRAY of f64s, 4 per
 /// rectangle (left, top, width, height) — a selection can span multiple
 /// visual lines/rects, hence the flattening.
-unsafe fn parse_rect_safearray(sa: *mut windows::Win32::System::Com::SAFEARRAY) -> WinResult<Vec<(f64, f64, f64, f64)>> {
+unsafe fn parse_rect_safearray(
+    sa: *mut windows::Win32::System::Com::SAFEARRAY,
+) -> WinResult<Vec<(f64, f64, f64, f64)>> {
     let lbound = SafeArrayGetLBound(sa, 1)?;
     let ubound = SafeArrayGetUBound(sa, 1)?;
     if ubound < lbound {

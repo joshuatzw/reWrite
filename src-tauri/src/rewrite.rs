@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-const EDGE_FUNCTION_URL: &str =
-    "https://jrzcedtyqyzfqbfuabxa.supabase.co/functions/v1/rewrite";
+const EDGE_FUNCTION_URL: &str = "https://jrzcedtyqyzfqbfuabxa.supabase.co/functions/v1/rewrite";
 
 #[derive(Serialize)]
 struct EdgeRequest {
@@ -58,10 +57,9 @@ pub async fn call_api_raw(
 
     if response.status() == reqwest::StatusCode::FORBIDDEN {
         let detail: serde_json::Value = response.json().await.unwrap_or_default();
-        let message = detail
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("This request is outside reWrite's scope of text rewriting, refining, and translation.");
+        let message = detail.get("error").and_then(|e| e.as_str()).unwrap_or(
+            "This request is outside reWrite's scope of text rewriting, refining, and translation.",
+        );
         return Err(anyhow!("{message}"));
     }
 
@@ -78,5 +76,8 @@ pub async fn call_api_raw(
     }
 
     let text = parsed.text.ok_or_else(|| anyhow!("No text in response"))?;
-    Ok(RewriteResult { text, rewrite_count: parsed.rewrite_count })
+    Ok(RewriteResult {
+        text,
+        rewrite_count: parsed.rewrite_count,
+    })
 }

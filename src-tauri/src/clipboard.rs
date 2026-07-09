@@ -6,7 +6,11 @@ use std::time::Duration;
 
 // macOS uses Cmd (Meta) for copy/paste; Windows/Linux use Ctrl.
 fn copy_paste_mod() -> Key {
-    if cfg!(target_os = "macos") { Key::Meta } else { Key::Control }
+    if cfg!(target_os = "macos") {
+        Key::Meta
+    } else {
+        Key::Control
+    }
 }
 
 /// Block until the user has physically released every modifier key that could
@@ -102,12 +106,18 @@ pub fn snapshot_clipboard() -> Result<String> {
 
 /// Write result to clipboard, simulate Ctrl+V, then optionally restore the original.
 pub fn paste_and_restore(
+    trace_id: u64,
     result: &str,
     original: &str,
     restore: bool,
     restore_delay_ms: u64,
 ) -> Result<()> {
+    crate::trace(&format!(
+        "paste#{trace_id}: paste_and_restore start result={} restore={restore}",
+        crate::text_fingerprint(result)
+    ));
     Clipboard::new()?.set_text(result)?;
+    crate::trace(&format!("paste#{trace_id}: plain clipboard written"));
 
     thread::sleep(Duration::from_millis(50));
 
@@ -117,10 +127,15 @@ pub fn paste_and_restore(
     enigo.key(Key::Unicode('v'), Direction::Click)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
+    crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));
 
     if restore && !original.is_empty() {
         thread::sleep(Duration::from_millis(restore_delay_ms));
         let _ = Clipboard::new()?.set_text(original);
+        crate::trace(&format!(
+            "paste#{trace_id}: original clipboard restored len={}",
+            original.len()
+        ));
     }
 
     Ok(())
@@ -130,13 +145,20 @@ pub fn paste_and_restore(
 /// plain-text fallback for apps that only read plain text), then pastes it.
 /// arboard maps this to CF_HTML on Windows and `public.html` on macOS.
 pub fn paste_html_and_restore(
+    trace_id: u64,
     html: &str,
     plain_fallback: &str,
     original: &str,
     restore: bool,
     restore_delay_ms: u64,
 ) -> Result<()> {
+    crate::trace(&format!(
+        "paste#{trace_id}: paste_html_and_restore start html={} fallback={} restore={restore}",
+        crate::text_fingerprint(html),
+        crate::text_fingerprint(plain_fallback)
+    ));
     Clipboard::new()?.set().html(html, Some(plain_fallback))?;
+    crate::trace(&format!("paste#{trace_id}: HTML clipboard written"));
 
     thread::sleep(Duration::from_millis(50));
 
@@ -146,10 +168,15 @@ pub fn paste_html_and_restore(
     enigo.key(Key::Unicode('v'), Direction::Click)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
+    crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));
 
     if restore && !original.is_empty() {
         thread::sleep(Duration::from_millis(restore_delay_ms));
         let _ = Clipboard::new()?.set_text(original);
+        crate::trace(&format!(
+            "paste#{trace_id}: original clipboard restored len={}",
+            original.len()
+        ));
     }
 
     Ok(())
@@ -250,6 +277,9 @@ mod tests {
 
     #[test]
     fn br_becomes_newline() {
-        assert_eq!(strip_html_tags("line one<br>line two"), "line one\nline two");
+        assert_eq!(
+            strip_html_tags("line one<br>line two"),
+            "line one\nline two"
+        );
     }
 }

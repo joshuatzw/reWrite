@@ -138,6 +138,16 @@ export default function BubbleMenu() {
       resetForNewSelection("resetEvent", true);
     }).then((fn) => unlisteners.push(fn));
 
+    listen("selection:detected", () => {
+      dbg("selection:detected received");
+      resetForNewSelection("selectionDetected", true);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen("selection:cleared", () => {
+      dbg("selection:cleared received");
+      resetForNewSelection("selectionCleared", true);
+    }).then((fn) => unlisteners.push(fn));
+
     return () => unlisteners.forEach((fn) => fn());
   }, [resetForNewSelection]);
 
@@ -146,6 +156,11 @@ export default function BubbleMenu() {
   }, [status, error, items]);
 
   async function handleSelect(skillId: string) {
+    if (statusRef.current === "loading") {
+      dbg(`handleSelect ignored while loading skill=${skillId}`);
+      return;
+    }
+    dbg(`handleSelect start skill=${skillId}`);
     cancelledRef.current = false;
     statusRef.current = "loading";
     setStatus("loading");
@@ -156,7 +171,10 @@ export default function BubbleMenu() {
       if (cancelledRef.current) return;
       // paste_text hides this window itself (see commands.rs), which already
       // covers "close the menu after a successful paste".
-      await invoke("paste_text", { result });
+      const traceId = Date.now();
+      dbg(`paste#${traceId}: invoking paste_text result_len=${result.length}`);
+      await invoke("paste_text", { result, traceId });
+      dbg(`paste#${traceId}: paste_text returned`);
       statusRef.current = "idle";
       setStatus("idle");
     } catch (err) {

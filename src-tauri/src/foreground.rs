@@ -173,7 +173,10 @@ mod tests {
     #[test]
     fn browser_on_rich_webapp_is_html() {
         assert_eq!(
-            classify("chrome.exe", "Inbox (2) - me@gmail.com - Gmail - Google Chrome"),
+            classify(
+                "chrome.exe",
+                "Inbox (2) - me@gmail.com - Gmail - Google Chrome"
+            ),
             OutputFormat::Html
         );
         assert_eq!(

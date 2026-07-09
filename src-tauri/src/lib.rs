@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Mutex,
+use std::{
+    hash::{Hash, Hasher},
+    sync::{
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
+        Mutex,
+    },
 };
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
@@ -12,19 +15,25 @@ pub mod auth;
 pub mod clipboard;
 pub mod commands;
 pub mod config;
+#[cfg(target_os = "windows")]
+pub mod esc_hook;
 pub mod foreground;
 pub mod history;
 pub mod rewrite;
 pub mod secure_store;
-pub mod skills;
-#[cfg(target_os = "windows")]
-pub mod esc_hook;
 #[cfg(target_os = "windows")]
 pub mod selection_watcher;
+pub mod skills;
 
 /// Visible size (logical px) of the bubble ring drawn in Bubble.tsx. Kept in
 /// sync with that component's own hardcoded size.
-const BUBBLE_VISIBLE_SIZE: f64 = 20.0;
+const BUBBLE_VISIBLE_SIZE: f64 = 30.0;
+
+/// Offset from the UIA selection anchor to the visible bubble's center. A small
+/// positive X keeps it just past the selection edge; a negative Y tucks it
+/// slightly above the bottom of the highlight so it reads as attached.
+const BUBBLE_ANCHOR_CENTER_OFFSET_X: f64 = 6.0;
+const BUBBLE_ANCHOR_CENTER_OFFSET_Y: f64 = -8.0;
 
 /// Extra invisible margin (logical px) added on each side of the bubble
 /// window beyond the visible ring (see Bubble.tsx), to make the actual click
@@ -40,6 +49,8 @@ pub const BUBBLE_MENU_PARKED_X: f64 = -32000.0;
 pub const BUBBLE_MENU_PARKED_Y: f64 = -32000.0;
 static BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static PASTE_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
+static PASTE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn is_bubble_menu_parked(x: i32, y: i32) -> bool {
     (x - BUBBLE_MENU_PARKED_X as i32).abs() < 100 && (y - BUBBLE_MENU_PARKED_Y as i32).abs() < 100
@@ -70,6 +81,56 @@ pub fn trace(where_: &str) {
     );
 }
 
+pub fn next_paste_trace_id() -> u64 {
+    PASTE_TRACE_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+pub fn text_fingerprint(text: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("len={} hash={:016x}", text.len(), hasher.finish())
+}
+
+#[cfg(target_os = "windows")]
+pub fn remember_paste_target_window() {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let hwnd = unsafe { GetForegroundWindow().0 as isize };
+    PASTE_TARGET_HWND.store(hwnd, Ordering::SeqCst);
+    trace(&format!("remember_paste_target_window: hwnd={hwnd}"));
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn remember_paste_target_window() {}
+
+#[cfg(target_os = "windows")]
+pub fn focus_paste_target_window() -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+
+    let hwnd = PASTE_TARGET_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        trace("focus_paste_target_window: no hwnd stored");
+        return false;
+    }
+
+    let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            trace("focus_paste_target_window: hwnd no longer valid");
+            return false;
+        }
+        let ok = SetForegroundWindow(hwnd).as_bool();
+        trace(&format!("focus_paste_target_window: set_foreground={ok}"));
+        ok
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn focus_paste_target_window() -> bool {
+    false
+}
+
 pub struct AppState {
     pub captured_text: Mutex<Option<String>>,
     pub original_clipboard: Mutex<Option<String>>,
@@ -82,6 +143,7 @@ pub struct AppState {
     pub history: Mutex<history::HistoryStore>,
     pub http_client: reqwest::Client,
     pub is_capturing: AtomicBool,
+    pub is_pasting: AtomicBool,
     /// In-flight guard covering the ENTIRE super-hotkey rewrite
     /// (capture → API → paste), so hammering the super-hotkey cannot fire
     /// overlapping API calls / racing clipboard writes. `is_capturing` only
@@ -123,16 +185,17 @@ pub fn show_overlay(app: &AppHandle) {
             trace("show_overlay: esc_hook::start done");
             return;
         }
-        let _ = tauri::WebviewWindowBuilder::new(&handle, "overlay", tauri::WebviewUrl::App("".into()))
-            .title("")
-            .decorations(false)
-            .always_on_top(true)
-            .transparent(true)
-            .skip_taskbar(true)
-            .inner_size(480.0, 430.0)
-            .center()
-            .focused(true)
-            .build();
+        let _ =
+            tauri::WebviewWindowBuilder::new(&handle, "overlay", tauri::WebviewUrl::App("".into()))
+                .title("")
+                .decorations(false)
+                .always_on_top(true)
+                .transparent(true)
+                .skip_taskbar(true)
+                .inner_size(480.0, 430.0)
+                .center()
+                .focused(true)
+                .build();
     });
 }
 
@@ -191,14 +254,20 @@ fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
 
-    let pt = POINT { x: x as i32, y: y as i32 };
+    let pt = POINT {
+        x: x as i32,
+        y: y as i32,
+    };
     let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
 
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }.ok().is_err() {
+    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }
+        .ok()
+        .is_err()
+    {
         // No monitor info available — fall back to the raw, unclamped point
         // rather than guessing.
         return (x, y);
@@ -246,9 +315,20 @@ pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
             // session showed clicks aimed at the old 16x16 target routinely
             // missing it entirely (the click landed on the source app instead,
             // which silently cleared the selection, and `bubble_clicked` never
-            // fired). Shift back by half the padding so the visible dot still
-            // lands at the same anchor point as before.
-            let (x, y) = clamp_to_monitor(&w, x - BUBBLE_HIT_PADDING, y - BUBBLE_HIT_PADDING);
+            // fired). UIA gives us the bottom-right corner of the final
+            // selection rect. Place the visible ring's center very close to
+            // that anchor, then subtract the ring radius and transparent
+            // padding because set_position moves the larger hit window, not
+            // the visible ring itself.
+            let (x, y) = clamp_to_monitor(
+                &w,
+                x + BUBBLE_ANCHOR_CENTER_OFFSET_X
+                    - BUBBLE_VISIBLE_SIZE / 2.0
+                    - BUBBLE_HIT_PADDING,
+                y + BUBBLE_ANCHOR_CENTER_OFFSET_Y
+                    - BUBBLE_VISIBLE_SIZE / 2.0
+                    - BUBBLE_HIT_PADDING,
+            );
             let _ = w.set_position(PhysicalPosition::new(x, y));
             // Re-toggling always-on-top moves the window to the very top of
             // the topmost band, ahead of any other always-on-top window (some
@@ -258,7 +338,10 @@ pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
             let _ = w.set_always_on_top(false);
             let _ = w.set_always_on_top(true);
             let show_result = w.show();
-            trace(&format!("show_bubble: at ({x}, {y}) show={:?}", show_result.is_ok()));
+            trace(&format!(
+                "show_bubble: at ({x}, {y}) show={:?}",
+                show_result.is_ok()
+            ));
         } else {
             trace("show_bubble: bubble window not found");
         }
@@ -287,17 +370,13 @@ pub fn bubble_menu_probe_suppressed() -> bool {
 }
 
 fn suppress_bubble_menu_probe() {
-    BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS.store(
-        now_ms() + BUBBLE_MENU_CLOSE_SUPPRESS_MS,
-        Ordering::SeqCst,
-    );
+    BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS
+        .store(now_ms() + BUBBLE_MENU_CLOSE_SUPPRESS_MS, Ordering::SeqCst);
 }
 
 fn suppress_bubble_menu_outside_click() {
-    BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS.store(
-        now_ms() + BUBBLE_MENU_OPEN_CLICK_GRACE_MS,
-        Ordering::SeqCst,
-    );
+    BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS
+        .store(now_ms() + BUBBLE_MENU_OPEN_CLICK_GRACE_MS, Ordering::SeqCst);
 }
 
 fn bubble_menu_outside_click_suppressed() -> bool {
@@ -309,8 +388,8 @@ fn bubble_menu_outside_click_suppressed() -> bool {
 ///
 /// The menu webview is prebuilt at startup. Building or reloading a WebView
 /// from this click path can stall or briefly paint transparent on Windows, so
-/// showing means resetting the existing React tree by event and moving it
-/// on-screen.
+/// showing means moving the existing window on-screen, focusing it, then
+/// resetting the live React tree by event.
 pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -321,21 +400,16 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
         // destroy it as an "outside" click before the user ever sees it.
         suppress_bubble_menu_outside_click();
 
-        let (x, y) = clamp_rect_to_monitor(
-            x + 8.0,
-            y + 8.0,
-            BUBBLE_MENU_WIDTH,
-            BUBBLE_MENU_HEIGHT,
-        );
+        let (x, y) = clamp_rect_to_monitor(x + 8.0, y + 8.0, BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT);
 
         if let Some(w) = handle.get_webview_window("bubble_menu") {
             let _ = w.set_size(LogicalSize::new(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT));
             let _ = w.set_position(PhysicalPosition::new(x, y));
-            let emit_result = w.emit("bubble-menu:show", ());
             let _ = w.set_always_on_top(false);
             let _ = w.set_always_on_top(true);
             let show_result = w.show();
             let focus_result = w.set_focus();
+            let emit_result = w.emit("bubble-menu:show", ());
             trace(&format!(
                 "show_bubble_menu: shown at ({x}, {y}) emit={:?} show={:?} focus={:?}",
                 emit_result.is_ok(),
@@ -349,16 +423,26 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
 }
 
 pub fn hide_bubble_menu(app: &AppHandle) {
+    hide_bubble_menu_inner(app, true);
+}
+
+fn hide_bubble_menu_inner(app: &AppHandle, suppress_probe: bool) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        suppress_bubble_menu_probe();
+        if suppress_probe {
+            suppress_bubble_menu_probe();
+        }
         if let Some(w) = handle.get_webview_window("bubble_menu") {
             let _ = w.emit("bubble-menu:reset", ());
             let _ = w.set_position(PhysicalPosition::new(
                 BUBBLE_MENU_PARKED_X,
                 BUBBLE_MENU_PARKED_Y,
             ));
-            trace("hide_bubble_menu: reset emitted and parked window");
+            let reload_result = w.reload();
+            trace(&format!(
+                "hide_bubble_menu: reset emitted, parked window, reload={:?}, suppress_probe={suppress_probe}",
+                reload_result.is_ok()
+            ));
         }
     });
 }
@@ -373,7 +457,12 @@ pub fn hide_bubble_menu(app: &AppHandle) {
 /// or fail to transfer depending on how it was shown). All window queries run
 /// on the main thread, like every other window operation in this file.
 #[cfg(target_os = "windows")]
-pub fn maybe_close_bubble_menu_on_outside_click(app: &AppHandle, x: i32, y: i32) {
+pub fn maybe_close_bubble_menu_on_outside_click(
+    app: &AppHandle,
+    x: i32,
+    y: i32,
+    allow_probe_after_close: bool,
+) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(w) = handle.get_webview_window("bubble_menu") else {
@@ -403,7 +492,7 @@ pub fn maybe_close_bubble_menu_on_outside_click(app: &AppHandle, x: i32, y: i32)
             trace("maybe_close_bubble_menu_on_outside_click: click outside, closing");
             // Delegate to hide_bubble_menu so every close parks/resets the
             // webview and arms the same short re-probe suppression.
-            hide_bubble_menu(&handle);
+            hide_bubble_menu_inner(&handle, !allow_probe_after_close);
         }
     });
 }
@@ -438,7 +527,11 @@ pub async fn ensure_valid_token(app: &AppHandle) -> Option<String> {
         return Some(session.access_token);
     }
 
-    let auth_path = app.path().app_config_dir().ok().map(|d| d.join("auth.json"));
+    let auth_path = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("auth.json"));
 
     match auth::refresh_session(&client, session).await {
         Ok(refreshed) => {
@@ -476,15 +569,16 @@ pub fn show_settings(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    if let Ok(w) = tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
-        .title("reWrite - Settings")
-        .decorations(true)
-        .always_on_top(false)
-        .inner_size(1260.0, 870.0)
-        .min_inner_size(900.0, 600.0)
-        .center()
-        .resizable(true)
-        .build()
+    if let Ok(w) =
+        tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("".into()))
+            .title("reWrite - Settings")
+            .decorations(true)
+            .always_on_top(false)
+            .inner_size(1260.0, 870.0)
+            .min_inner_size(900.0, 600.0)
+            .center()
+            .resizable(true)
+            .build()
     {
         let _ = w.set_focus();
     }
@@ -498,9 +592,18 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let Some(state) = app.try_state::<AppState>() else { return };
-            let access_token = state.auth_session.lock().unwrap().as_ref().map(|s| s.access_token.clone());
-            let Some(access_token) = access_token else { return };
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let access_token = state
+                .auth_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.access_token.clone());
+            let Some(access_token) = access_token else {
+                return;
+            };
 
             if let Ok(sub) = auth::sync_subscription(&state.http_client, &access_token).await {
                 *state.subscription.lock().unwrap() = sub;
@@ -523,9 +626,18 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let Some(state) = app.try_state::<AppState>() else { return };
-            let access_token = state.auth_session.lock().unwrap().as_ref().map(|s| s.access_token.clone());
-            let Some(access_token) = access_token else { return };
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let access_token = state
+                .auth_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.access_token.clone());
+            let Some(access_token) = access_token else {
+                return;
+            };
 
             if let Ok(sub) = auth::sync_subscription(&state.http_client, &access_token).await {
                 *state.subscription.lock().unwrap() = sub;
@@ -546,7 +658,9 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let Some(state) = app.try_state::<AppState>() else { return };
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
         let client = state.http_client.clone();
 
         let email = auth::get_user_email(&client, &access_token)
@@ -578,7 +692,9 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 
 fn on_hotkey(app: &AppHandle) {
     trace("on_hotkey: enter");
-    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
 
     // Sample the foreground app now, while the target still has focus — before
     // the overlay steals it — so we know whether to emit HTML or plain text.
@@ -592,6 +708,9 @@ fn on_hotkey(app: &AppHandle) {
         trace("on_hotkey: already capturing, bail");
         return;
     }
+
+    #[cfg(target_os = "windows")]
+    remember_paste_target_window();
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -610,8 +729,12 @@ fn on_hotkey(app: &AppHandle) {
                 _ => (None, None),
             };
 
-            if let Ok(mut g) = s.captured_text.lock() { *g = text_val; }
-            if let Ok(mut g) = s.original_clipboard.lock() { *g = orig_val; }
+            if let Ok(mut g) = s.captured_text.lock() {
+                *g = text_val;
+            }
+            if let Ok(mut g) = s.original_clipboard.lock() {
+                *g = orig_val;
+            }
         }
 
         show_overlay(&app);
@@ -634,7 +757,9 @@ impl Drop for RewriteGuard {
 }
 
 fn on_super_hotkey(app: &AppHandle) {
-    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
 
     // Whole-rewrite in-flight guard: a second concurrent super-hotkey press
     // while a rewrite is running is dropped silently. Set this BEFORE
@@ -657,6 +782,9 @@ fn on_super_hotkey(app: &AppHandle) {
     if let Ok(mut fmt) = state.foreground_format.lock() {
         *fmt = foreground::detect();
     }
+
+    #[cfg(target_os = "windows")]
+    remember_paste_target_window();
 
     show_processing(app);
 
@@ -689,15 +817,25 @@ fn on_super_hotkey(app: &AppHandle) {
             }
         };
 
-        if let Ok(mut g) = state.captured_text.lock() { *g = Some(text.clone()); }
-        if let Ok(mut g) = state.original_clipboard.lock() { *g = Some(original.clone()); }
+        if let Ok(mut g) = state.captured_text.lock() {
+            *g = Some(text.clone());
+        }
+        if let Ok(mut g) = state.original_clipboard.lock() {
+            *g = Some(original.clone());
+        }
 
         let (model, default_skill_id, paste_delay_ms, restore, restore_delay_ms) = {
             let Ok(cfg) = state.config.lock() else {
                 hide_processing(&app);
                 return;
             };
-            (cfg.model.clone(), cfg.default_skill_id.clone(), cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms)
+            (
+                cfg.model.clone(),
+                cfg.default_skill_id.clone(),
+                cfg.paste_delay_ms,
+                cfg.restore_clipboard,
+                cfg.restore_delay_ms,
+            )
         };
 
         let format = state
@@ -711,8 +849,7 @@ fn on_super_hotkey(app: &AppHandle) {
                 hide_processing(&app);
                 return;
             };
-            let system =
-                skills::build_system_prompt(&sc, Some(&default_skill_id), format);
+            let system = skills::build_system_prompt(&sc, Some(&default_skill_id), format);
             let name = skills::skill_display_name(&sc, &default_skill_id);
             (system, name)
         };
@@ -720,18 +857,21 @@ fn on_super_hotkey(app: &AppHandle) {
         let client = state.http_client.clone();
         let user_message = format!("<text>\n{text}\n</text>");
 
-        let result = match rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model).await {
-            Ok(o) => o,
-            Err(e) => {
-                if is_limit_error(&e.to_string()) {
-                    // Show the red "out of free rewrites" glow briefly, then dismiss.
-                    show_processing_limit(&app);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(2200)).await;
+        let result =
+            match rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if is_limit_error(&e.to_string()) {
+                        // Show the red "out of free rewrites" glow briefly, then dismiss.
+                        show_processing_limit(&app);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(2200)).await;
+                    }
+                    hide_processing(&app);
+                    return;
                 }
-                hide_processing(&app);
-                return;
-            }
-        };
+            };
         let output = result.text;
         // For HTML targets the model returns markup; keep a plain-text form for
         // the clipboard fallback and for history / word-count.
@@ -768,18 +908,36 @@ fn on_super_hotkey(app: &AppHandle) {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            focus_paste_target_window();
+        }
+        let paste_trace_id = next_paste_trace_id();
+        trace(&format!(
+            "paste#{paste_trace_id}: super-hotkey paste scheduled format={format:?} output={} original_len={} restore={} restore_delay_ms={} paste_delay_ms={}",
+            text_fingerprint(&output),
+            original.len(),
+            restore,
+            restore_delay_ms,
+            paste_delay_ms
+        ));
         tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
         let _ = tokio::task::spawn_blocking(move || match format {
             foreground::OutputFormat::Html => clipboard::paste_html_and_restore(
+                paste_trace_id,
                 &output,
                 &plain_output,
                 &original,
                 restore,
                 restore_delay_ms,
             ),
-            foreground::OutputFormat::PlainText => {
-                clipboard::paste_and_restore(&output, &original, restore, restore_delay_ms)
-            }
+            foreground::OutputFormat::PlainText => clipboard::paste_and_restore(
+                paste_trace_id,
+                &output,
+                &original,
+                restore,
+                restore_delay_ms,
+            ),
         })
         .await;
 
@@ -802,9 +960,13 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state() != ShortcutState::Pressed { return; }
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
 
-                    let Some(state) = app.try_state::<AppState>() else { return };
+                    let Some(state) = app.try_state::<AppState>() else {
+                        return;
+                    };
                     let Ok(cfg) = state.config.lock() else { return };
                     let super_hk = cfg.super_hotkey.clone();
                     drop(cfg);
@@ -831,6 +993,7 @@ pub fn run() {
             history: Mutex::new(history::HistoryStore::default()),
             http_client: reqwest::Client::new(),
             is_capturing: AtomicBool::new(false),
+            is_pasting: AtomicBool::new(false),
             is_rewriting: AtomicBool::new(false),
             auth_session: Mutex::new(None),
             subscription: Mutex::new(auth::SubscriptionCache::default()),
@@ -874,7 +1037,9 @@ pub fn run() {
             if let Some(session) = maybe_session {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(state) = app_handle.try_state::<AppState>() else { return };
+                    let Some(state) = app_handle.try_state::<AppState>() else {
+                        return;
+                    };
                     let client = state.http_client.clone();
                     let auth_path = match app_handle.path().app_config_dir() {
                         Ok(d) => d.join("auth.json"),
@@ -913,9 +1078,13 @@ pub fn run() {
                     interval.tick().await; // skip the immediate tick
                     loop {
                         interval.tick().await;
-                        if app_handle.try_state::<AppState>().is_none() { break }
+                        if app_handle.try_state::<AppState>().is_none() {
+                            break;
+                        }
                         if let Some(token) = ensure_valid_token(&app_handle).await {
-                            let Some(state) = app_handle.try_state::<AppState>() else { break };
+                            let Some(state) = app_handle.try_state::<AppState>() else {
+                                break;
+                            };
                             if let Ok(sub) =
                                 auth::sync_subscription(&state.http_client, &token).await
                             {
@@ -932,8 +1101,12 @@ pub fn run() {
                 use tauri_plugin_updater::UpdaterExt;
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let Ok(updater) = app_handle.updater() else { return };
-                    let Ok(Some(update)) = updater.check().await else { return };
+                    let Ok(updater) = app_handle.updater() else {
+                        return;
+                    };
+                    let Ok(Some(update)) = updater.check().await else {
+                        return;
+                    };
                     if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
                         app_handle.request_restart();
                     }
@@ -970,7 +1143,11 @@ pub fn run() {
             }
 
             if super_hotkey != hotkey {
-                if app.global_shortcut().register(super_hotkey.as_str()).is_err() {
+                if app
+                    .global_shortcut()
+                    .register(super_hotkey.as_str())
+                    .is_err()
+                {
                     eprintln!("Failed to register super hotkey '{super_hotkey}'");
                 }
             }
@@ -1204,7 +1381,9 @@ pub fn run() {
             // ── Tray ──────────────────────────────────────────────────────────
             let settings_item = MenuItemBuilder::new("Settings").id("settings").build(app)?;
             let quit_item = MenuItemBuilder::new("Quit reWrite").id("quit").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&settings_item, &quit_item]).build()?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&settings_item, &quit_item])
+                .build()?;
 
             let tooltip = if hotkey_ok {
                 format!("reWrite  ·  {hotkey}")
