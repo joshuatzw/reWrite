@@ -3,14 +3,30 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-fn default_hotkey() -> String { "ctrl+shift+r".to_string() }
-fn default_super_hotkey() -> String { "ctrl+shift+period".to_string() }
-fn default_model() -> String { "claude-sonnet-4-6".to_string() }
-fn default_restore_clipboard() -> bool { true }
-fn default_restore_delay_ms() -> u64 { 500 }
-fn default_paste_delay_ms() -> u64 { 400 }
-fn default_default_skill_id() -> String { "__proofread__".to_string() }
-fn default_bubble_enabled() -> bool { true }
+fn default_hotkey() -> String {
+    "ctrl+shift+r".to_string()
+}
+fn default_super_hotkey() -> String {
+    "ctrl+shift+period".to_string()
+}
+fn default_model() -> String {
+    "claude-sonnet-4-6".to_string()
+}
+fn default_restore_clipboard() -> bool {
+    true
+}
+fn default_restore_delay_ms() -> u64 {
+    500
+}
+fn default_paste_delay_ms() -> u64 {
+    400
+}
+fn default_default_skill_id() -> String {
+    "__proofread__".to_string()
+}
+fn default_bubble_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

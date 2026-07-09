@@ -5,194 +5,23 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
-
-interface AuthState {
-  logged_in: boolean;
-  email: string;
-  is_subscribed: boolean;
-  subscription_valid_until: string | null;
-  rewrite_count: number;
-}
 import { BUILTIN_SKILLS } from "../skills";
 import logoBlack from "../assets/rewrite_logo_black.png";
-
-// ── Constants ──────────────────────────────────────────────────────────────────
-
-const ACCENT = "#16161a";
-const FREE_TIER_MONTHLY_LIMIT = 3;
-
-const BUILTIN_SKILL_OPTIONS = BUILTIN_SKILLS.map((b) => ({ id: b.id, name: b.name }));
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function getGreeting(): string {
-  const h = new Date().getHours();
-  if (h < 12) return "Good morning";
-  if (h < 17) return "Good afternoon";
-  return "Good evening";
-}
-
-function hotkeyParts(raw: string): string[] {
-  return raw.split("+").map((k) => k.trim().charAt(0).toUpperCase() + k.trim().slice(1));
-}
-
-function formatTime(ms: number): string {
-  const d = new Date(ms);
-  const todayStr = new Date().toDateString();
-  const yestStr = new Date(Date.now() - 86400000).toDateString();
-  if (d.toDateString() === todayStr) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  if (d.toDateString() === yestStr) return "Yesterday";
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function truncate(text: string, max: number): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-  return clean.length > max ? clean.slice(0, max).trimEnd() + "…" : clean;
-}
-
-function firstNameFromEmail(email: string): string {
-  const local = email.split("@")[0];
-  const part = local.split(/[._]/)[0];
-  return part.charAt(0).toUpperCase() + part.slice(1);
-}
-
-function initialsFromEmail(email: string): string {
-  const parts = email.split("@")[0].split(/[._]/);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return parts[0].slice(0, 2).toUpperCase();
-}
-
-function formatRenewalDate(isoStr: string | null): string {
-  if (!isoStr) return "";
-  return new Date(isoStr).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
-}
-
-interface DayStats { streakDays: number; weekDots: boolean[] }
-function computeStreak(entries: HistoryEntry[]): DayStats {
-  const today = new Date();
-  const dow = today.getDay();
-  const mondayOffset = dow === 0 ? -6 : 1 - dow;
-
-  const weekDots: boolean[] = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + mondayOffset + i);
-    const isPast = d <= today;
-    const hit = isPast && entries.some((e) => new Date(e.timestamp_ms).toDateString() === d.toDateString());
-    weekDots.push(hit);
-  }
-
-  let streak = 0;
-  for (let i = 0; i < 60; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    if (entries.some((e) => new Date(e.timestamp_ms).toDateString() === d.toDateString())) {
-      streak++;
-    } else {
-      break;
-    }
-  }
-  return { streakDays: streak, weekDots };
-}
-
-interface WordStats { total: number; last7: number[]; weekWords: number }
-function computeWordStats(entries: HistoryEntry[]): WordStats {
-  const today = new Date();
-  const last7: number[] = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const ds = d.toDateString();
-    const words = entries.filter((e) => new Date(e.timestamp_ms).toDateString() === ds)
-      .reduce((s, e) => s + e.output_word_count, 0);
-    last7.push(words);
-  }
-  const total = entries.reduce((s, e) => s + e.output_word_count, 0);
-  const weekWords = last7.reduce((a, b) => a + b, 0);
-  return { total, last7, weekWords };
-}
-
-function groupByDate(entries: HistoryEntry[]): { label: string; items: HistoryEntry[] }[] {
-  const todayStr = new Date().toDateString();
-  const yestStr = new Date(Date.now() - 86400000).toDateString();
-
-  const today = entries.filter((e) => new Date(e.timestamp_ms).toDateString() === todayStr);
-  const yesterday = entries.filter((e) => new Date(e.timestamp_ms).toDateString() === yestStr);
-  const earlier = entries.filter((e) => {
-    const s = new Date(e.timestamp_ms).toDateString();
-    return s !== todayStr && s !== yestStr;
-  });
-
-  return [
-    ...(today.length ? [{ label: "Today", items: today }] : []),
-    ...(yesterday.length ? [{ label: "Yesterday", items: yesterday }] : []),
-    ...(earlier.length ? [{ label: "Earlier", items: earlier }] : []),
-  ];
-}
-
-// ── Toggle ─────────────────────────────────────────────────────────────────────
-
-function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return (
-    <div
-      onClick={(e) => { e.stopPropagation(); onToggle(); }}
-      style={{
-        width: 42, height: 24, borderRadius: 13, cursor: "pointer",
-        position: "relative", transition: "background .18s", flexShrink: 0,
-        background: on ? ACCENT : "#d7d8dc",
-      }}
-    >
-      <div style={{
-        position: "absolute", top: 3, left: on ? 21 : 3,
-        width: 18, height: 18, borderRadius: "50%",
-        background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)",
-        transition: "left .18s",
-      }} />
-    </div>
-  );
-}
-
-// ── Icons ──────────────────────────────────────────────────────────────────────
-
-const IconHome = () => (
-  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-    <rect x="3.5" y="3.5" width="7" height="7" rx="1.6" />
-    <rect x="13.5" y="3.5" width="7" height="7" rx="1.6" />
-    <rect x="3.5" y="13.5" width="7" height="7" rx="1.6" />
-    <rect x="13.5" y="13.5" width="7" height="7" rx="1.6" />
-  </svg>
-);
-
-const IconHistory = () => (
-  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3.2 12a8.8 8.8 0 1 0 2.9-6.5L3 8" />
-    <path d="M3 4v4h4" />
-    <path d="M12 7.4V12l3 1.8" />
-  </svg>
-);
-
-const IconBook = () => (
-  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3 5.2A2.2 2.2 0 0 1 5.2 3H12v16.5H5.2A2.2 2.2 0 0 0 3 21.7z" />
-    <path d="M21 5.2A2.2 2.2 0 0 0 18.8 3H12v16.5h6.8A2.2 2.2 0 0 1 21 21.7z" />
-  </svg>
-);
-
-const IconGear = () => (
-  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="3.1" />
-    <path d="M19.1 14.5a1.55 1.55 0 0 0 .31 1.71l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.55 1.55 0 0 0-1.71-.31 1.55 1.55 0 0 0-.94 1.42V20a2 2 0 0 1-4 0v-.07a1.55 1.55 0 0 0-1.02-1.42 1.55 1.55 0 0 0-1.71.31l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.55 1.55 0 0 0 .31-1.71 1.55 1.55 0 0 0-1.42-.94H4a2 2 0 0 1 0-4h.07a1.55 1.55 0 0 0 1.42-1.02 1.55 1.55 0 0 0-.31-1.71l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.55 1.55 0 0 0 1.71.31H9.7a1.55 1.55 0 0 0 .94-1.42V4a2 2 0 0 1 4 0v.07a1.55 1.55 0 0 0 .94 1.42 1.55 1.55 0 0 0 1.71-.31l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.55 1.55 0 0 0-.31 1.71v.06a1.55 1.55 0 0 0 1.42.94H20a2 2 0 0 1 0 4h-.07a1.55 1.55 0 0 0-1.42.94z" />
-  </svg>
-);
-
-const IconLock = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
-    <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
-  </svg>
-);
+import type { ActiveView, AuthState } from "./settingsTypes";
+import { ACCENT, BUILTIN_SKILL_OPTIONS, FREE_TIER_MONTHLY_LIMIT } from "./settingsConstants";
+import { IconLock, Sidebar, Toggle } from "./settingsComponents";
+import {
+  computeStreak,
+  computeWordStats,
+  firstNameFromEmail,
+  formatRenewalDate,
+  formatTime,
+  getGreeting,
+  groupByDate,
+  hotkeyParts,
+  initialsFromEmail,
+  truncate,
+} from "./settingsHelpers";
 
 // ── Login view ────────────────────────────────────────────────────────────────
 
@@ -270,65 +99,6 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
         )}
       </div>
     </div>
-  );
-}
-
-// ── NavButton ──────────────────────────────────────────────────────────────────
-
-type ActiveView = "home" | "history" | "skills" | "settings";
-
-function NavButton({ label, icon, active, onClick, locked }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void; locked?: boolean }) {
-  const [hov, setHov] = useState(false);
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHov(true)}
-      onMouseLeave={() => setHov(false)}
-      style={{
-        display: "flex", alignItems: "center", gap: 13, width: "100%",
-        padding: "11px 14px", borderRadius: 11,
-        fontFamily: "'Hanken Grotesk', sans-serif", fontSize: 15.5, fontWeight: 500,
-        cursor: "pointer", textAlign: "left", transition: "background .15s, color .15s",
-        background: active ? "#fff" : hov ? "rgba(0,0,0,.04)" : "transparent",
-        color: locked ? "#a7aab0" : active ? "#16161a" : "#44464d",
-        border: active ? "1px solid #e3e4e7" : "1px solid transparent",
-        boxShadow: active ? "0 1px 2px rgba(20,20,26,.10)" : "none",
-      }}
-    >
-      {icon}
-      <span style={{ flex: 1 }}>{label}</span>
-      {locked && <IconLock />}
-    </button>
-  );
-}
-
-// ── Sidebar ────────────────────────────────────────────────────────────────────
-
-function Sidebar({ active, setActive, authState }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState }) {
-  return (
-    <aside style={{ width: 250, minWidth: 250, background: "#e6e7ea", borderRight: "1px solid #dcdde1", display: "flex", flexDirection: "column", padding: "30px 20px 22px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 4px 30px" }}>
-        <img src={logoBlack} alt="reWrite" style={{ height: 58, width: "auto" }} />
-      </div>
-      <nav style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
-        <NavButton label="History"  icon={<IconHistory />} active={active === "history"}  onClick={() => setActive("history")} />
-        <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} locked={!authState.is_subscribed} />
-        <NavButton label="Settings" icon={<IconGear />}    active={active === "settings"} onClick={() => setActive("settings")} />
-      </nav>
-      <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", borderRadius: 11, background: "#dddee2" }}>
-          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 13, letterSpacing: .3, flexShrink: 0 }}>
-            {initialsFromEmail(authState.email)}
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
-            <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
-          </div>
-        </div>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version 1.0.5</div>
-      </div>
-    </aside>
   );
 }
 

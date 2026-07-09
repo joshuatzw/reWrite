@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{atomic::Ordering, Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::AppState;
@@ -42,6 +42,18 @@ fn log_history(
     }
 }
 
+struct PasteGuard<'a> {
+    state: &'a AppState,
+    trace_id: u64,
+}
+
+impl Drop for PasteGuard<'_> {
+    fn drop(&mut self) {
+        self.state.is_pasting.store(false, Ordering::SeqCst);
+        crate::trace(&format!("paste#{}: paste guard released", self.trace_id));
+    }
+}
+
 // ── Overlay commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -52,41 +64,87 @@ pub fn get_captured_text(state: State<AppState>) -> Option<String> {
 #[tauri::command]
 pub async fn paste_text(
     result: String,
+    trace_id: Option<u64>,
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let trace_id = trace_id.unwrap_or_else(crate::next_paste_trace_id);
+    if state.is_pasting.swap(true, Ordering::SeqCst) {
+        crate::trace(&format!(
+            "paste#{trace_id}: dropped because another paste_text command is already running"
+        ));
+        return Ok(());
+    }
+    let _paste_guard = PasteGuard {
+        state: &*state,
+        trace_id,
+    };
+
     let (original, paste_delay_ms, restore, restore_delay_ms, format) = {
         let original = lock(&state.original_clipboard)?.clone().unwrap_or_default();
         let format = *lock(&state.foreground_format)?;
         let cfg = lock(&state.config)?;
-        (original, cfg.paste_delay_ms, cfg.restore_clipboard, cfg.restore_delay_ms, format)
+        (
+            original,
+            cfg.paste_delay_ms,
+            cfg.restore_clipboard,
+            cfg.restore_delay_ms,
+            format,
+        )
     };
+    let caller = window.label().to_string();
+    crate::trace(&format!(
+        "paste#{trace_id}: command entered caller={caller} format={format:?} result={} original_len={} restore={} restore_delay_ms={} paste_delay_ms={}",
+        crate::text_fingerprint(&result),
+        original.len(),
+        restore,
+        restore_delay_ms,
+        paste_delay_ms
+    ));
 
     // bubble_menu is prewarmed and parked/reset instead of hidden, so a
     // successful paste must go through the same close path as dismissals.
     // Every other caller (Overlay) still gets a real hide.
-    if window.label() == "bubble_menu" {
+    if caller == "bubble_menu" {
+        crate::trace(&format!(
+            "paste#{trace_id}: closing bubble_menu and restoring source focus"
+        ));
         crate::hide_bubble_menu(window.app_handle());
         #[cfg(target_os = "windows")]
         {
             crate::selection_watcher::focus_last_source_window();
         }
     } else {
+        crate::trace(&format!(
+            "paste#{trace_id}: hiding caller window and restoring paste target"
+        ));
         window.hide().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        {
+            crate::focus_paste_target_window();
+        }
     }
+    crate::trace(&format!(
+        "paste#{trace_id}: sleeping before Ctrl+V for {paste_delay_ms}ms"
+    ));
     tokio::time::sleep(tokio::time::Duration::from_millis(paste_delay_ms)).await;
 
     tokio::task::spawn_blocking(move || match format {
         crate::foreground::OutputFormat::Html => crate::clipboard::paste_html_and_restore(
+            trace_id,
             &result,
             &crate::clipboard::strip_html_tags(&result),
             &original,
             restore,
             restore_delay_ms,
         ),
-        crate::foreground::OutputFormat::PlainText => {
-            crate::clipboard::paste_and_restore(&result, &original, restore, restore_delay_ms)
-        }
+        crate::foreground::OutputFormat::PlainText => crate::clipboard::paste_and_restore(
+            trace_id,
+            &result,
+            &original,
+            restore,
+            restore_delay_ms,
+        ),
     })
     .await
     .map_err(|e| e.to_string())?
@@ -118,22 +176,18 @@ pub async fn rewrite_with_skill(
     let format = *lock(&state.foreground_format)?;
     let client = state.http_client.clone();
 
-    let system = crate::skills::build_system_prompt(
-        &skills_config,
-        Some(&effective_skill_id),
-        format,
-    );
+    let system =
+        crate::skills::build_system_prompt(&skills_config, Some(&effective_skill_id), format);
     let user_message = format!("<text>\n{text}\n</text>");
 
-    let result = crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
-        .await
-        .map_err(|e| e.to_string())?;
+    let result =
+        crate::rewrite::call_api_raw(&client, &access_token, &system, &user_message, &model)
+            .await
+            .map_err(|e| e.to_string())?;
 
     // History stores a plain-text rendering; HTML output is only for the paste.
     let logged = match format {
-        crate::foreground::OutputFormat::Html => {
-            crate::clipboard::strip_html_tags(&result.text)
-        }
+        crate::foreground::OutputFormat::Html => crate::clipboard::strip_html_tags(&result.text),
         crate::foreground::OutputFormat::PlainText => result.text.clone(),
     };
     log_history(&app, &state, &effective_skill_id, &text, &logged);
@@ -293,11 +347,7 @@ pub fn open_settings(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn update_hotkey(
-    hotkey: String,
-    state: State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn update_hotkey(hotkey: String, state: State<AppState>, app: AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let old_hotkey = lock(&state.config)?.hotkey.clone();
@@ -440,11 +490,7 @@ pub fn create_skill(
 }
 
 #[tauri::command]
-pub fn delete_skill(
-    id: String,
-    state: State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn delete_skill(id: String, state: State<AppState>, app: AppHandle) -> Result<(), String> {
     let mut config = lock(&state.skills_config)?.clone();
     config.skills.retain(|s| s.id != id);
     for (i, s) in config.skills.iter_mut().enumerate() {
@@ -510,7 +556,10 @@ pub fn get_auth_state(state: State<AppState>) -> AuthState {
     let sub = state.subscription.lock().unwrap();
     AuthState {
         logged_in: session.is_some(),
-        email: session.as_ref().map(|s| s.email.clone()).unwrap_or_default(),
+        email: session
+            .as_ref()
+            .map(|s| s.email.clone())
+            .unwrap_or_default(),
         is_subscribed: sub.is_subscribed,
         subscription_valid_until: sub.subscription_valid_until.clone(),
         rewrite_count: sub.rewrite_count,
@@ -518,10 +567,7 @@ pub fn get_auth_state(state: State<AppState>) -> AuthState {
 }
 
 #[tauri::command]
-pub async fn send_magic_link(
-    email: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn send_magic_link(email: String, state: State<'_, AppState>) -> Result<(), String> {
     crate::auth::send_magic_link(&state.http_client, &email)
         .await
         .map_err(|e| e.to_string())
@@ -553,14 +599,13 @@ pub async fn open_checkout(
         .await
         .map_err(|e| e.to_string())?;
 
-    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn open_billing_portal(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub async fn open_billing_portal(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
     let access_token = crate::ensure_valid_token(&app)
@@ -571,7 +616,9 @@ pub async fn open_billing_portal(
         .await
         .map_err(|e| e.to_string())?;
 
-    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

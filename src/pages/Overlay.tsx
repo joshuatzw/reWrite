@@ -120,13 +120,21 @@ export default function Overlay() {
   }, []);
 
   async function handleSelect(skillId: string) {
+    if (statusRef.current === "loading") {
+      await invoke("debug_trace", { msg: `Overlay handleSelect ignored while loading skill=${skillId}` }).catch(() => {});
+      return;
+    }
+    await invoke("debug_trace", { msg: `Overlay handleSelect start skill=${skillId}` }).catch(() => {});
     cancelledRef.current = false;
     setStatus("loading");
     setError(null);
     try {
       const result = await invoke<string>("rewrite_with_skill", { skillId });
       if (cancelledRef.current) return;
-      await invoke("paste_text", { result });
+      const traceId = Date.now();
+      await invoke("debug_trace", { msg: `Overlay paste#${traceId}: invoking paste_text result_len=${result.length}` }).catch(() => {});
+      await invoke("paste_text", { result, traceId });
+      await invoke("debug_trace", { msg: `Overlay paste#${traceId}: paste_text returned` }).catch(() => {});
       setStatus("idle");
     } catch (err) {
       if (cancelledRef.current) return;

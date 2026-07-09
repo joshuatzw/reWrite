@@ -1,7 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, path::Path,
+    fs,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
