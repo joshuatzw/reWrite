@@ -546,6 +546,7 @@ pub struct AuthState {
     pub logged_in: bool,
     pub email: String,
     pub is_subscribed: bool,
+    pub plan: Option<String>,
     pub subscription_valid_until: Option<String>,
     pub rewrite_count: u32,
 }
@@ -561,6 +562,7 @@ pub fn get_auth_state(state: State<AppState>) -> AuthState {
             .map(|s| s.email.clone())
             .unwrap_or_default(),
         is_subscribed: sub.is_subscribed,
+        plan: sub.plan.clone(),
         subscription_valid_until: sub.subscription_valid_until.clone(),
         rewrite_count: sub.rewrite_count,
     }
@@ -635,5 +637,6 @@ pub async fn refresh_subscription(
         .map_err(|e| e.to_string())?;
 
     *state.subscription.lock().unwrap() = sub;
+    let _ = app.emit("auth:complete", ());
     Ok(())
 }

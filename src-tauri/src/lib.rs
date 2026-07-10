@@ -1065,6 +1065,7 @@ pub fn run() {
 
                     if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
                         *state.subscription.lock().unwrap() = sub;
+                        let _ = app_handle.emit("auth:complete", ());
                     }
                 });
             }
@@ -1089,6 +1090,7 @@ pub fn run() {
                                 auth::sync_subscription(&state.http_client, &token).await
                             {
                                 *state.subscription.lock().unwrap() = sub;
+                                let _ = app_handle.emit("auth:complete", ());
                             }
                         }
                     }

@@ -17,6 +17,7 @@ pub struct AuthSession {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SubscriptionCache {
     pub is_subscribed: bool,
+    pub plan: Option<String>,
     pub subscription_valid_until: Option<String>,
     pub rewrite_count: u32,
     pub synced_at: Option<i64>,
@@ -114,6 +115,7 @@ pub async fn refresh_session(
 #[derive(Deserialize)]
 struct SyncResponse {
     is_subscribed: bool,
+    plan: Option<String>,
     subscription_valid_until: Option<String>,
     rewrite_count: Option<u32>,
 }
@@ -137,6 +139,7 @@ pub async fn sync_subscription(
 
     Ok(SubscriptionCache {
         is_subscribed: data.is_subscribed,
+        plan: data.plan,
         subscription_valid_until: data.subscription_valid_until,
         rewrite_count: data.rewrite_count.unwrap_or(0),
         synced_at: Some(now_secs()),

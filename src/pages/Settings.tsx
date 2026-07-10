@@ -20,6 +20,7 @@ import {
   groupByDate,
   hotkeyParts,
   initialsFromEmail,
+  planLabel,
   truncate,
 } from "./settingsHelpers";
 
@@ -806,7 +807,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
             <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 20, color: "#16161a" }}>Plan &amp; billing</h3>
             <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: .5, textTransform: "uppercase", color: authState.is_subscribed ? "#fff" : "#5b5e66", background: authState.is_subscribed ? ACCENT : "#f1f2f4", padding: "5px 11px", borderRadius: 7, border: authState.is_subscribed ? "none" : "1px solid #e3e4e7" }}>
-              {authState.is_subscribed ? "Pro" : "Free"}
+              {authState.is_subscribed ? planLabel(authState.plan) : "Free"}
             </span>
           </div>
 

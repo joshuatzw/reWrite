@@ -36,6 +36,7 @@ serve(async (req) => {
   if (!profile?.stripe_customer_id) {
     return json({
       is_subscribed: false,
+      plan: null,
       subscription_valid_until: null,
       trial_end: null,
       rewrite_count: profile?.rewrite_count ?? 0,
@@ -72,6 +73,7 @@ serve(async (req) => {
 
   return json({
     is_subscribed,
+    plan,
     subscription_valid_until,
     trial_end,
     rewrite_count: profile.rewrite_count ?? 0,

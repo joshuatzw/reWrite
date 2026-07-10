@@ -1,15 +1,67 @@
 use anyhow::Result;
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
 // macOS uses Cmd (Meta) for copy/paste; Windows/Linux use Ctrl.
+#[cfg(not(target_os = "macos"))]
 fn copy_paste_mod() -> Key {
-    if cfg!(target_os = "macos") {
-        Key::Meta
-    } else {
-        Key::Control
+    Key::Control
+}
+
+#[cfg(target_os = "macos")]
+mod macos_keys {
+    use anyhow::{anyhow, Result};
+    use std::ffi::c_void;
+    use std::thread;
+    use std::time::Duration;
+
+    const KEY_C: u16 = 8;
+    const KEY_V: u16 = 9;
+    const CG_HID_EVENT_TAP: u32 = 0;
+    const CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *mut c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> *mut c_void;
+        fn CGEventSetFlags(event: *mut c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *mut c_void);
+        fn CFRelease(cf: *const c_void);
+    }
+
+    fn post_key(virtual_key: u16, key_down: bool, flags: u64) -> Result<()> {
+        let event =
+            unsafe { CGEventCreateKeyboardEvent(std::ptr::null_mut(), virtual_key, key_down) };
+        if event.is_null() {
+            return Err(anyhow!("CGEventCreateKeyboardEvent failed"));
+        }
+
+        unsafe {
+            CGEventSetFlags(event, flags);
+            CGEventPost(CG_HID_EVENT_TAP, event);
+            CFRelease(event as *const c_void);
+        }
+        Ok(())
+    }
+
+    fn command_shortcut(virtual_key: u16) -> Result<()> {
+        post_key(virtual_key, true, CG_EVENT_FLAG_MASK_COMMAND)?;
+        thread::sleep(Duration::from_millis(20));
+        post_key(virtual_key, false, CG_EVENT_FLAG_MASK_COMMAND)
+    }
+
+    pub fn copy() -> Result<()> {
+        command_shortcut(KEY_C)
+    }
+
+    pub fn paste() -> Result<()> {
+        command_shortcut(KEY_V)
     }
 }
 
@@ -57,13 +109,16 @@ pub fn capture_selection() -> Result<(String, String)> {
     wait_for_modifiers_release(Duration::from_millis(1000));
 
     // Belt-and-suspenders: also release the modifiers synthetically so nothing
-    // bleeds into the copy on platforms without the wait above.
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Shift, Direction::Release)?;
-    enigo.key(Key::Control, Direction::Release)?;
-    #[cfg(target_os = "macos")]
-    enigo.key(Key::Meta, Direction::Release)?;
-    drop(enigo);
+    // bleeds into the copy on platforms without the wait above. Do not use
+    // enigo for this on macOS: its layout lookup calls HIToolbox APIs that
+    // assert when reached from the Tokio worker thread that runs this capture.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut enigo = Enigo::new(&Settings::default())?;
+        enigo.key(Key::Shift, Direction::Release)?;
+        enigo.key(Key::Control, Direction::Release)?;
+        drop(enigo);
+    }
 
     thread::sleep(Duration::from_millis(100));
 
@@ -78,15 +133,21 @@ pub fn capture_selection() -> Result<(String, String)> {
     // Simulate Cmd+C (Mac) or Ctrl+C (Windows/Linux). Press the modifier and
     // give it a beat to register before pressing `c`, so the key is never seen
     // without its modifier.
-    let modifier = copy_paste_mod();
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(modifier, Direction::Press)?;
-    thread::sleep(Duration::from_millis(40));
-    enigo.key(Key::Unicode('c'), Direction::Press)?;
-    thread::sleep(Duration::from_millis(20));
-    enigo.key(Key::Unicode('c'), Direction::Release)?;
-    enigo.key(modifier, Direction::Release)?;
-    drop(enigo);
+    #[cfg(target_os = "macos")]
+    macos_keys::copy()?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let modifier = copy_paste_mod();
+        let mut enigo = Enigo::new(&Settings::default())?;
+        enigo.key(modifier, Direction::Press)?;
+        thread::sleep(Duration::from_millis(40));
+        enigo.key(Key::Unicode('c'), Direction::Press)?;
+        thread::sleep(Duration::from_millis(20));
+        enigo.key(Key::Unicode('c'), Direction::Release)?;
+        enigo.key(modifier, Direction::Release)?;
+        drop(enigo);
+    }
 
     // Wait for the source app to fill the clipboard.
     thread::sleep(Duration::from_millis(200));
@@ -121,12 +182,18 @@ pub fn paste_and_restore(
 
     thread::sleep(Duration::from_millis(50));
 
-    let modifier = copy_paste_mod();
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(modifier, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(modifier, Direction::Release)?;
-    drop(enigo);
+    #[cfg(target_os = "macos")]
+    macos_keys::paste()?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let modifier = copy_paste_mod();
+        let mut enigo = Enigo::new(&Settings::default())?;
+        enigo.key(modifier, Direction::Press)?;
+        enigo.key(Key::Unicode('v'), Direction::Click)?;
+        enigo.key(modifier, Direction::Release)?;
+        drop(enigo);
+    }
     crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));
 
     if restore && !original.is_empty() {
@@ -162,12 +229,18 @@ pub fn paste_html_and_restore(
 
     thread::sleep(Duration::from_millis(50));
 
-    let modifier = copy_paste_mod();
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(modifier, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(modifier, Direction::Release)?;
-    drop(enigo);
+    #[cfg(target_os = "macos")]
+    macos_keys::paste()?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let modifier = copy_paste_mod();
+        let mut enigo = Enigo::new(&Settings::default())?;
+        enigo.key(modifier, Direction::Press)?;
+        enigo.key(Key::Unicode('v'), Direction::Click)?;
+        enigo.key(modifier, Direction::Release)?;
+        drop(enigo);
+    }
     crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));
 
     if restore && !original.is_empty() {

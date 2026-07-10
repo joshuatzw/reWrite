@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import logoBlack from "../assets/rewrite_logo_black.png";
 import { ACCENT, APP_VERSION } from "./settingsConstants";
-import { initialsFromEmail } from "./settingsHelpers";
+import { initialsFromEmail, planLabel } from "./settingsHelpers";
 import type { ActiveView, AuthState } from "./settingsTypes";
 
 export function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
@@ -107,7 +107,7 @@ export function Sidebar({ active, setActive, authState }: { active: ActiveView; 
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
-            <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
+            <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? `reWrite ${planLabel(authState.plan)}` : "Free plan"}</div>
           </div>
         </div>
         <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version {APP_VERSION}</div>

@@ -44,6 +44,12 @@ export function formatRenewalDate(isoStr: string | null): string {
   return new Date(isoStr).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+export function planLabel(plan: "pro" | "max" | null | undefined): string {
+  if (plan === "max") return "Max";
+  if (plan === "pro") return "Pro";
+  return "Pro";
+}
+
 interface DayStats {
   streakDays: number;
   weekDots: boolean[];
