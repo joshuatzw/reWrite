@@ -34,7 +34,17 @@ export default function Bubble() {
           with the reWrite logo centered on it — chosen for contrast against
           dark editor themes (e.g. VS Code) where the original near-black dot
           was invisible, and recognizable as this app's own affordance rather
-          than a generic dot. */}
+          than a generic dot.
+
+          Deliberately NOT wired to the --rw-* theme tokens (macOS dark mode
+          support, see src/theme.css): this dot floats over arbitrary,
+          unpredictable app content (a light Notes doc, a dark VS Code theme,
+          anything), not over reWrite's own chrome, so its colors need to stay
+          fixed for legibility against whatever is behind it rather than
+          follow the user's system light/dark appearance — the same reasoning
+          already written down above for why it's white-on-conic-gradient
+          instead of a plain dot. Reconsider only if this needs to blend with
+          reWrite's own surfaces instead of contrast against arbitrary ones. */}
       <div style={{ position: "relative", width: 30, height: 30 }}>
         <div
           style={{

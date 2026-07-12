@@ -82,14 +82,19 @@ export default function Processing() {
         style={{ animation: "rw-appear 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both" }}
       >
         {variant === "limit" ? (
-          // Pill with the trial-limit message and a red glow.
+          // Pill with the trial-limit message and a red glow. Background
+          // follows the brand accent token (src/theme.css); the glow
+          // box-shadow colors are left as literals — this is a floating,
+          // self-contained notification badge (like Bubble.tsx's dot) whose
+          // red/white glow is meant to read as "alert" against any
+          // background, not to match the system light/dark appearance.
           <div
             style={{
               maxWidth: 420,
               padding: "16px 28px",
               borderRadius: 26,
-              background: "#16161a",
-              color: "#fff",
+              background: "var(--rw-accent)",
+              color: "var(--rw-on-accent)",
               fontFamily: "'Hanken Grotesk', system-ui, sans-serif",
               fontSize: 14,
               fontWeight: 500,
@@ -103,13 +108,16 @@ export default function Processing() {
             {LIMIT_TEXT}
           </div>
         ) : (
-          // Opaque circle with logo and a faint grey/white glow.
+          // Opaque circle with logo and a faint grey/white glow. Same
+          // reasoning as above: background follows the accent token, glow
+          // shadow stays literal (floating badge, contrast-against-anything
+          // by design).
           <div
             style={{
               width: 77,
               height: 77,
               borderRadius: "50%",
-              background: "#16161a",
+              background: "var(--rw-accent)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",

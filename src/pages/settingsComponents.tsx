@@ -12,13 +12,13 @@ export function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) 
       style={{
         width: 42, height: 24, borderRadius: 13, cursor: "pointer",
         position: "relative", transition: "background .18s", flexShrink: 0,
-        background: on ? ACCENT : "#d7d8dc",
+        background: on ? ACCENT : "var(--rw-toggle-off)",
       }}
     >
       <div style={{
         position: "absolute", top: 3, left: on ? 21 : 3,
         width: 18, height: 18, borderRadius: "50%",
-        background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)",
+        background: "var(--rw-on-accent)", boxShadow: "0 1px 3px rgba(0,0,0,.25)",
         transition: "left .18s",
       }} />
     </div>
@@ -63,7 +63,14 @@ export const IconLock = () => (
   </svg>
 );
 
-function NavButton({ label, icon, active, onClick, locked }: { label: string; icon: ReactNode; active: boolean; onClick: () => void; locked?: boolean }) {
+export const IconShield = () => (
+  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3.2 4.5 6v6.2c0 4.6 3.1 8.2 7.5 9.6 4.4-1.4 7.5-5 7.5-9.6V6z" />
+    <path d="M9 12.2l2.1 2.1L15.3 10" />
+  </svg>
+);
+
+function NavButton({ label, icon, active, onClick, locked, dot }: { label: string; icon: ReactNode; active: boolean; onClick: () => void; locked?: boolean; dot?: string }) {
   const [hov, setHov] = useState(false);
   return (
     <button
@@ -75,22 +82,23 @@ function NavButton({ label, icon, active, onClick, locked }: { label: string; ic
         padding: "11px 14px", borderRadius: 11,
         fontFamily: "'Hanken Grotesk', sans-serif", fontSize: 15.5, fontWeight: 500,
         cursor: "pointer", textAlign: "left", transition: "background .15s, color .15s",
-        background: active ? "#fff" : hov ? "rgba(0,0,0,.04)" : "transparent",
-        color: locked ? "#a7aab0" : active ? "#16161a" : "#44464d",
-        border: active ? "1px solid #e3e4e7" : "1px solid transparent",
+        background: active ? "var(--rw-bg-primary)" : hov ? "var(--rw-hover-overlay)" : "transparent",
+        color: locked ? "var(--rw-text-faint)" : active ? "var(--rw-text-primary)" : "var(--rw-text-secondary)",
+        border: active ? "1px solid var(--rw-border)" : "1px solid transparent",
         boxShadow: active ? "0 1px 2px rgba(20,20,26,.10)" : "none",
       }}
     >
       {icon}
       <span style={{ flex: 1 }}>{label}</span>
+      {dot && <span title={dot === "var(--rw-danger)" ? "Action needed" : "Enabled"} style={{ width: 8, height: 8, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
       {locked && <IconLock />}
     </button>
   );
 }
 
-export function Sidebar({ active, setActive, authState }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState }) {
+export function Sidebar({ active, setActive, authState, accessibilityGranted }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState; accessibilityGranted: boolean }) {
   return (
-    <aside style={{ width: 250, minWidth: 250, background: "#e6e7ea", borderRight: "1px solid #dcdde1", display: "flex", flexDirection: "column", padding: "30px 20px 22px" }}>
+    <aside style={{ width: 250, minWidth: 250, background: "var(--rw-bg-secondary)", borderRight: "1px solid var(--rw-border)", display: "flex", flexDirection: "column", padding: "30px 20px 22px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 4px 30px" }}>
         <img src={logoBlack} alt="reWrite" style={{ height: 58, width: "auto" }} />
       </div>
@@ -98,19 +106,20 @@ export function Sidebar({ active, setActive, authState }: { active: ActiveView; 
         <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
         <NavButton label="History"  icon={<IconHistory />} active={active === "history"}  onClick={() => setActive("history")} />
         <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} locked={!authState.is_subscribed} />
+        <NavButton label="Accessibility" icon={<IconShield />} active={active === "accessibility"} onClick={() => setActive("accessibility")} dot={accessibilityGranted ? "var(--rw-success)" : "var(--rw-danger)"} />
         <NavButton label="Settings" icon={<IconGear />}    active={active === "settings"} onClick={() => setActive("settings")} />
       </nav>
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", borderRadius: 11, background: "#dddee2" }}>
-          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "#16161a", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 13, letterSpacing: .3, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", borderRadius: 11, background: "var(--rw-bg-secondary-raised)" }}>
+          <div style={{ width: 34, height: 34, borderRadius: "50%", background: "var(--rw-accent)", color: "var(--rw-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 13, letterSpacing: .3, flexShrink: 0 }}>
             {initialsFromEmail(authState.email)}
           </div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1f2026", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
-            <div style={{ fontSize: 11.5, color: "#83868d" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
+            <div style={{ fontSize: 11.5, color: "var(--rw-text-muted)" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
           </div>
         </div>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3", paddingLeft: 4 }}>Version {APP_VERSION}</div>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "var(--rw-text-faint)", paddingLeft: 4 }}>Version {APP_VERSION}</div>
       </div>
     </aside>
   );

@@ -1,0 +1,252 @@
+# reWrite — Mac Roadmap
+
+This roadmap tracks the work needed to bring the existing reWrite experience to macOS. The basic rewrite flow should remain the same: select text anywhere, invoke reWrite, choose or apply a skill, and paste the result back into the source app without forcing a context switch.
+
+## Product goals
+
+- Preserve the current core loop: capture selected text, rewrite it, and paste the result back into the original app.
+- Make macOS permissions understandable before they become a failure state.
+- Add a lightweight floating bubble when text is highlighted, so users can rewrite without remembering a hotkey.
+- Keep the hotkey path available as the reliable fallback for apps where passive selection detection is limited.
+
+## Decisions to make
+
+| Area | Options | Default |
+|---|---|---|
+| Permission onboarding | First-run tutorial / Settings-only guide / both | Both |
+| Selection trigger | Accessibility API polling / mouse-up probe / hybrid | Hybrid |
+| Bubble behavior | Always on by default / opt-in | On by default with Settings toggle |
+| App compatibility | Best effort across all apps / explicit supported-app list | Best effort with known limitations |
+| Paste behavior | Simulated Cmd+V / direct app integration where possible | Simulated Cmd+V |
+
+## Phase 1 — macOS app foundation
+
+- [ ] Confirm Tauri macOS build configuration, bundle identifier, app icon, and signing requirements.
+- [ ] Map Windows-only modules to macOS equivalents:
+  - [x] `clipboard.rs`: Cmd+C / Cmd+V capture and paste behavior.
+    Code path exists and passes build/test via `capture_selection`,
+    `paste_and_restore`, and `paste_html_and_restore` using the macOS Meta key
+    plus Accessibility gating. Not real-device verified across target apps.
+  - [x] `esc_hook.rs`: global escape or dismissal handling. Implemented
+    2026-07-11 via a macOS `CGEventTap` (see `project.md` Recent Updates for
+    the full design writeup). Code-complete and passes `cargo
+    check`/`build`/`test`; NOT verified on a real device — no packaged app
+    run, no real Escape keypress observed dismissing a real overlay. See
+    `project.md` Known Gaps for exactly how a human should verify it.
+  - [x] `foreground.rs`: active app/window detection.
+    Code path exists via main-threaded `NSWorkspace` lookup and bundle-id
+    classification. Not runtime-verified; browsers remain plain-text on macOS
+    because tab/window titles are not read.
+  - [x] `selection_watcher.rs`: passive selection detection.
+    Implemented 2026-07-11 as a first-pass macOS `CGEventTap` + Accessibility
+    watcher that probes `AXSelectedText`/`AXBoundsForRange` and emits the
+    existing bubble events. Code-complete and passes build/test; NOT verified
+    on a real device. Multi-monitor clamping and app-compat testing remain
+    open.
+- [ ] Verify global shortcut registration for the existing hotkeys.
+- [ ] Confirm app windows behave correctly on macOS:
+  - Overlay appears near the active display or selection target.
+  - Processing window does not steal focus unnecessarily.
+  - Settings window opens normally from tray/menu bar.
+- [ ] Add a macOS menu bar/tray equivalent with Settings and Quit.
+
+## Phase 2 — Accessibility permission tutorial
+
+macOS will require Accessibility permission for system-wide capture, paste, hotkeys, and passive selection behavior. This needs to feel guided, not scary.
+
+- [x] Add first-run permission detection for Accessibility.
+- [x] Add a tutorial screen explaining why reWrite needs Accessibility:
+  - Read the currently selected text.
+  - Show the rewrite picker near the selection.
+  - Paste rewritten text back into the original app.
+- [x] Provide a clear button to open the correct macOS Settings page.
+- [x] Show a short step-by-step checklist:
+  - Open System Settings.
+  - Go to Privacy & Security → Accessibility.
+  - Enable reWrite.
+  - Return to reWrite.
+- [x] Detect when permission has been granted and continue automatically.
+- [x] Add a recovery path in Settings for users who skipped onboarding or revoked permission later.
+- [x] Add clear degraded-state messaging when Accessibility is missing:
+  - Hotkey capture may fail.
+  - Floating bubble will be disabled.
+  - Settings and account features still work.
+
+  Implemented 2026-07-11: see `project.md` Recent Updates for the full
+  breakdown (`AccessibilityView.tsx`, `check_accessibility_permission` /
+  `request_accessibility_permission` / `open_accessibility_settings` Tauri
+  commands, sidebar recovery entry, Home dashboard banner). Not verified on a
+  real device — no packaged app run, no click-through of the native
+  permission dialog or the System Settings deep link. Do not check off the
+  Manual test matrix or Release checklist rows below from this alone.
+
+## Phase 3 — Hotkey rewrite flow on Mac
+
+- [x] Implement selected-text capture with Cmd+C simulation and clipboard snapshot/restore.
+- [x] Implement paste-back with Cmd+V simulation and configurable paste delay.
+- [x] Preserve the existing rewrite pipeline:
+  - Overlay hotkey opens the skill picker.
+  - Super hotkey applies the default skill silently.
+  - Processing window appears while rewrite is running.
+  - Usage-limit and billing errors surface with the same upgrade path.
+- [ ] Test capture and paste in common Mac apps:
+  - Notes
+  - Mail
+  - Safari
+  - Chrome
+  - Slack
+  - Notion
+  - Google Docs
+  - Microsoft Word
+  - VS Code
+- [ ] Document app-specific limitations where selection capture or paste behavior differs.
+
+## Phase 4 — Floating bubble on text highlight
+
+This is the Mac version of the passive selection bubble: when the user highlights text, reWrite shows a small floating bubble near the selected text. Clicking it opens a compact skill menu.
+
+- [x] Build a macOS selection watcher that detects likely text-selection completion.
+- [x] Use the macOS Accessibility API to confirm a real text selection before showing the bubble.
+- [x] Capture:
+  - Selected text.
+  - Selection bounding rectangle where available.
+  - Source app/window identity for paste-back focus.
+- [x] Show a small always-on-top bubble near the selection endpoint.
+- [x] Clamp bubble position to the visible display area, including multi-monitor setups.
+- [ ] Hide the bubble when:
+  - [x] Selection is cleared.
+  - [x] User types over or deletes the selection.
+  - [ ] User switches apps.
+  - [x] User presses Escape.
+  - [x] Bubble menu opens.
+- [x] Add a compact bubble menu with skill titles only.
+- [x] Route bubble-menu actions through the same rewrite and paste pipeline as the overlay.
+- [x] Add a Settings toggle for "Selection bubble".
+- [x] Keep the hotkey flow independent so users can disable the bubble without losing core functionality.
+
+  First-pass implementation added 2026-07-11. This is code-complete only:
+  `cargo check`, `cargo build --lib --bins`, `cargo test --lib --bins`,
+  `npx tsc --noEmit`, and `npm run build` pass, but the bubble has not been
+  observed in a real macOS app. Do not check off the Manual test matrix or
+  Release checklist bubble rows until real-device testing confirms detection,
+  position, click-through, rewrite, paste-back, permission revoke/regrant, and
+  multi-monitor behavior.
+
+  Follow-up fix added 2026-07-11 after a real symptom report ("highlight text,
+  no bubble"): if the app launched before Accessibility was granted, the
+  watcher skipped startup and previously never restarted after the tutorial's
+  permission poll turned green. The macOS permission commands now start the
+  watcher when Accessibility is granted and the Selection bubble setting is on,
+  and stop it when permission is missing/revoked. Still requires real-device
+  verification.
+
+  Second follow-up pass added 2026-07-11: filled three gaps found against the
+  first-pass implementation. (1) `probe_selection` now has the
+  Electron/web-app fallback described in this phase's plan —
+  `AXUIElementCopyElementAtPosition` on the last mouse-up point when the
+  focused element has no usable selection — matching the Windows backend's
+  `ElementFromPoint` fallback. (2) Multi-monitor clamping is now real:
+  `clamp_rect_to_monitor`'s macOS branch uses `CGGetDisplaysWithPoint`/
+  `CGDisplayBounds` to find and clamp against the containing display's bounds
+  (full display bounds, not a menu-bar/dock-excluded work area — see
+  `src-tauri/src/lib.rs`'s `mod mac_display` doc comment for why). (3) Clicking
+  outside the bubble menu now closes it on macOS too — the mouse tap now also
+  taps `kCGEventLeftMouseDown`, computes drag distance the same way the
+  Windows hook does, and calls the previously Windows-only
+  `maybe_close_bubble_menu_on_outside_click` (now cross-platform; its body was
+  already generic Tauri window calls). Coordinate-space and AX
+  thread-affinity questions were researched (not assumed) this pass — see
+  `project.md`'s Known Gaps for the findings and sourcing. Added unit tests
+  for the new pure logic (`clamp_point_to_bounds`, `selection_anchor_from_rect`,
+  `is_selection_significant`). Still requires real-device verification — see
+  `project.md`.
+
+## Phase 5 — Mac polish and reliability
+
+- [ ] Add compatibility tracing for failed capture, paste, and bubble detection cases.
+- [ ] Add user-facing troubleshooting for Accessibility permission, clipboard permission prompts, and unsupported apps.
+- [ ] Verify dark mode and light mode styling for:
+  - Settings
+  - Overlay
+  - Processing window
+  - Bubble
+  - Bubble menu
+
+  Implementation added 2026-07-11: a centralized `--rw-*` CSS custom-property
+  color system (`src/theme.css`, imported from `src/index.css`) with light
+  defaults and a `@media (prefers-color-scheme: dark)` override block. All
+  five windows listed above had their inline `style={{...}}` hex-literal
+  colors converted to reference these tokens — `Settings.tsx` and
+  `settingsComponents.tsx` (Settings, including the Sidebar), `Overlay.tsx`,
+  `Processing.tsx`, `Bubble.tsx`, and `BubbleMenu.tsx`. `Bubble.tsx`'s dot and
+  `BubbleMenu.tsx`'s loading spinner deliberately keep their existing fixed
+  palette (documented in both files) since they float over arbitrary,
+  unpredictable app content and need to stay legible against anything, not
+  follow the system theme; `Processing.tsx`'s glow shadows are the same case.
+
+  Same-day critical-review follow-up: `AccessibilityView.tsx` (one of
+  Settings' five internal views — it auto-opens on first run and on any
+  Accessibility revoke, so it's not a rare corner) was converted too, closing
+  the one gap the first pass had left; a Toggle on/off dark-mode contrast bug
+  (both states read as the same dark-gray pill) was fixed with a new
+  `--rw-toggle-off` token. Box-shadow elevation colors remain intentionally
+  unconverted (documented future polish, not a correctness issue — see
+  `project.md`'s Known Gaps).
+
+  `npx tsc --noEmit` and `npm run build` both pass, and the compiled CSS was
+  confirmed to contain the dark-mode media query and correct light/dark
+  values for every token (27 total, no orphans). **Left unchecked
+  deliberately** — this item says "verify," and nothing in this environment
+  can render a browser or take a screenshot, so none of this has been
+  visually confirmed. Implementation is now believed complete across all five
+  windows; the only remaining blocker to checking this box is the visual
+  pass itself. A human needs to set macOS Appearance to Dark, open every
+  Settings view (Home, History, Skills, Settings, Accessibility — including
+  landing on Accessibility with permission revoked), trigger the Overlay and
+  Processing windows, highlight text to see the Bubble/Bubble menu, and
+  toggle a Settings switch to confirm on/off are visibly distinct, checking
+  each for legible text and visible borders against the dark surfaces. Only
+  check this box after that's actually been done. See `project.md`'s Known
+  Gaps for the full writeup, including the one intentionally-left literal (a
+  `<select>` chevron baked into a data-URI SVG that can't reference a CSS
+  variable).
+- [ ] Verify behavior across display setups:
+  - Built-in display only.
+  - External monitor.
+  - Mixed Retina and non-Retina scaling.
+  - Selection near screen edges.
+- [ ] Confirm no noticeable input lag during rapid clicking, dragging, or typing.
+- [ ] Confirm the bubble does not appear during non-text drag actions where possible.
+
+## Manual test matrix
+
+| Scenario | Expected result |
+|---|---|
+| First launch without Accessibility permission | Tutorial appears and explains how to enable permission |
+| Permission granted while app is open | App detects permission and continues without restart if possible |
+| Highlight text in a supported app | Bubble appears near selection |
+| Click bubble | Bubble hides and compact skill menu appears |
+| Choose a skill from bubble menu | Rewritten text replaces original selection |
+| Press overlay hotkey | Full skill picker opens and works |
+| Press super hotkey | Default skill rewrites and pastes without picker |
+| Delete highlighted text while bubble is visible | Bubble disappears |
+| Switch apps while bubble is visible | Bubble disappears |
+| Disable Selection bubble in Settings | Bubble watcher stops and hotkeys still work |
+| Revoke Accessibility permission | Bubble disables and app shows recovery guidance |
+
+## Open questions
+
+- Which macOS versions should be officially supported?
+- Should the first Mac release ship with hotkeys first, then bubble, or wait until both are ready?
+- Do we want app-specific allow/deny rules if the Accessibility API behaves inconsistently in certain apps?
+- Should the tutorial include a short visual walkthrough or stay text-only for the first version?
+
+## Release checklist
+
+- [ ] Accessibility tutorial complete.
+- [ ] Hotkey rewrite flow verified in top target apps.
+- [ ] Floating selection bubble verified in top target apps.
+- [ ] Settings toggle for bubble works live.
+- [ ] Permission recovery path works after revoking Accessibility.
+- [ ] Signed and notarized macOS build produced.
+- [ ] Known limitations documented.

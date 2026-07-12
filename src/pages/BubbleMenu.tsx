@@ -201,6 +201,10 @@ export default function BubbleMenu() {
           userSelect: "none",
         }}
       >
+        {/* Same fixed-palette spinner design as Bubble.tsx's dot (see the
+            comment there): this floats over arbitrary app content while the
+            menu is loading, so it deliberately does not follow --rw-* dark
+            mode tokens. */}
         <div style={{ position: "relative", width: 30, height: 30 }}>
           <div
             style={{
@@ -238,8 +242,8 @@ export default function BubbleMenu() {
           width: "100%",
           height: "100%",
           borderRadius: 8,
-          border: "1px solid #e0e1e4",
-          background: "#fff",
+          border: "1px solid var(--rw-border)",
+          background: "var(--rw-bg-primary)",
           boxShadow: "0 8px 28px rgba(20,20,26,.16), 0 2px 8px rgba(20,20,26,.08)",
           display: "flex",
           flexDirection: "column",
@@ -250,7 +254,7 @@ export default function BubbleMenu() {
         {status === "error" && error ? (
           <div style={{ flex: 1, padding: "10px 12px", display: "flex", alignItems: "center" }}>
             {isLimitError(error) ? (
-              <p style={{ fontSize: 11, color: "#c0392b", lineHeight: 1.45, margin: 0 }}>
+              <p style={{ fontSize: 11, color: "var(--rw-danger)", lineHeight: 1.45, margin: 0 }}>
                 Free limit reached. Please{" "}
                 <a
                   onClick={() => {
@@ -262,14 +266,14 @@ export default function BubbleMenu() {
                     closeMenu("limitLink");
                     invoke("open_settings").catch(() => {});
                   }}
-                  style={{ color: "#c0392b", fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
+                  style={{ color: "var(--rw-danger)", fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
                 >
                   renew to Pro or Max
                 </a>{" "}
                 to continue.
               </p>
             ) : (
-              <p style={{ fontSize: 11, color: "#c0392b", lineHeight: 1.45, margin: 0 }}>{error}</p>
+              <p style={{ fontSize: 11, color: "var(--rw-danger)", lineHeight: 1.45, margin: 0 }}>{error}</p>
             )}
           </div>
         ) : (
@@ -289,11 +293,11 @@ export default function BubbleMenu() {
                   cursor: "pointer",
                   fontSize: 12.5,
                   fontWeight: 600,
-                  color: "#1f2026",
+                  color: "var(--rw-text-primary)",
                   transition: "background .1s",
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "#f0f1f3";
+                  e.currentTarget.style.background = "var(--rw-divider)";
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.background = "transparent";
