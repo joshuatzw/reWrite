@@ -1,0 +1,132 @@
+/* ── reWrite color system ─────────────────────────────────────────────────
+ *
+ * Centralized semantic color tokens for all inline-styled windows (Settings,
+ * Overlay, Processing, Bubble, Bubble menu). Every token has a light-mode
+ * default here and a dark-mode override in the `prefers-color-scheme: dark`
+ * block below. Call sites reference these via `var(--rw-*)` inside their
+ * existing `style={{...}}` objects instead of hardcoded hex literals.
+ *
+ * Design approach: dark-mode values mirror the light palette's existing
+ * relationships rather than introducing a new palette. Concretely:
+ *   - `--rw-bg-primary` / `--rw-text-primary` invert (near-white bg + near-
+ *     black text  ->  near-black bg + near-white text), preserving the same
+ *     contrast the light mode relies on.
+ *   - `--rw-accent` (this app's brand "ink" color, also exported as the
+ *     `ACCENT` JS constant in settingsConstants.ts) is used as both a text
+ *     color AND a filled surface color (buttons, selected rows, avatar
+ *     circles, the toggle's "on" state) always paired with white foreground
+ *     content on top. In dark mode it becomes a mid-dark neutral rather than
+ *     inverting all the way to white specifically so that paired white text/
+ *     icons (`--rw-on-accent`) stay legible without having to touch every
+ *     `color: "#fff"` call site that sits on an accent-filled surface.
+ *   - `--rw-danger` (the existing #c0392b error red) and `--rw-success`
+ *     (the existing #2e9e5b green) are lightened for dark backgrounds while
+ *     keeping the same hue, preserving their semantic meaning.
+ *   - Box-shadow colors (elevation/glow effects) are deliberately left as
+ *     literals in most call sites — they still read fine as depth cues in
+ *     both themes and redesigning elevation shadows for dark mode is out of
+ *     scope for this pass. See project.md for the full list of what was
+ *     deliberately left hardcoded and why.
+ */
+
+:root {
+  /* Backgrounds */
+  --rw-bg-primary: #ffffff;
+  --rw-bg-secondary: #e6e7ea;
+  --rw-bg-secondary-raised: #dddee2;
+  --rw-bg-subtle: #f3f4f5;
+  --rw-divider: #f0f1f3;
+  --rw-hover-overlay: rgba(0, 0, 0, 0.04);
+  --rw-backdrop-blur-bg: rgba(255, 255, 255, 0.92);
+  --rw-modal-backdrop: rgba(0, 0, 0, 0.45);
+  --rw-scrim: rgba(22, 22, 26, 0.92);
+
+  /* Borders */
+  --rw-border: #e0e1e4;
+  --rw-border-hover: #d6d8dc;
+  /* Toggle's off-state track color specifically. In dark mode this is
+     intentionally darker/more muted than --rw-accent's dark value so the
+     "on" (accent-filled) and "off" states stay visibly distinct — see the
+     file header's note on why --rw-accent itself is a mid-dark neutral in
+     dark mode rather than inverting to white. Light mode is unchanged from
+     before this token existed (equals --rw-border-hover's light value). */
+  --rw-toggle-off: #d6d8dc;
+
+  /* Text */
+  --rw-text-primary: #16161a;
+  --rw-text-secondary: #5b5e66;
+  --rw-text-muted: #74777e;
+  --rw-text-faint: #9a9da3;
+
+  /* Brand accent (mirrors settingsConstants.ts's ACCENT) */
+  --rw-accent: #16161a;
+  /* Foreground drawn on top of accent-filled surfaces. Intentionally
+     constant across themes — see file header comment. */
+  --rw-on-accent: #ffffff;
+  --rw-on-accent-muted: rgba(255, 255, 255, 0.55);
+
+  /* Status colors */
+  --rw-danger: #c0392b;
+  --rw-danger-bg: #fdf1f1;
+  --rw-danger-border: #fad8d8;
+  --rw-danger-text-strong: #8a2a20;
+  --rw-success: #2e9e5b;
+  /* Tinted success surface (banner/status-pill bg + border + strong text on
+     top of it), mirroring the --rw-danger-bg/-border/-text-strong trio above
+     for the equivalent green "all good" styling (e.g. AccessibilityView.tsx's
+     granted-status banner). */
+  --rw-success-bg: #f1f8f3;
+  --rw-success-border: #c9e6d2;
+  --rw-success-text-strong: #1f6b3d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Backgrounds */
+    --rw-bg-primary: #1c1c1f;
+    --rw-bg-secondary: #232326;
+    --rw-bg-secondary-raised: #2b2b2f;
+    --rw-bg-subtle: #29292d;
+    --rw-divider: #2c2c30;
+    --rw-hover-overlay: rgba(255, 255, 255, 0.06);
+    --rw-backdrop-blur-bg: rgba(28, 28, 31, 0.85);
+    --rw-modal-backdrop: rgba(0, 0, 0, 0.6);
+    --rw-scrim: rgba(0, 0, 0, 0.85);
+
+    /* Borders */
+    --rw-border: #3a3a3f;
+    --rw-border-hover: #46464c;
+    /* Deliberately darker/more muted than --rw-accent's dark value (#55555e,
+       ~27-33 per channel apart) so the Toggle's on/off states stay clearly
+       distinct in dark mode instead of both reading as "the same dark-gray
+       pill" (the original bug this token fixes). */
+    --rw-toggle-off: #3a3a3f;
+
+    /* Text */
+    --rw-text-primary: #f2f2f4;
+    --rw-text-secondary: #c6c8cd;
+    --rw-text-muted: #9a9ca3;
+    --rw-text-faint: #73747a;
+
+    /* Brand accent — mid-dark neutral (not inverted to white) so the
+       paired white on-accent foreground below stays legible without
+       per-call-site changes. Still clearly lighter than --rw-bg-primary
+       so filled buttons/selected rows remain distinguishable. */
+    --rw-accent: #55555e;
+    --rw-on-accent: #ffffff;
+    --rw-on-accent-muted: rgba(255, 255, 255, 0.55);
+
+    /* Status colors, lightened for contrast against dark surfaces */
+    --rw-danger: #e2685c;
+    --rw-danger-bg: #3a2020;
+    --rw-danger-border: #5a2c2c;
+    --rw-danger-text-strong: #f0a89f;
+    --rw-success: #4cc484;
+    /* Mirrors --rw-danger-bg/-border/-text-strong: dark muted green bg, a
+       slightly lighter green border, and a light green strong-text readable
+       on top of the dark green bg. */
+    --rw-success-bg: #1f3327;
+    --rw-success-border: #2f5540;
+    --rw-success-text-strong: #8fd9ab;
+  }
+}

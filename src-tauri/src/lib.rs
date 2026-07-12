@@ -1,27 +1,32 @@
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicI32;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicIsize;
 use std::{
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
 };
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Listener, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
+    AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
+    WebviewWindow,
 };
 
 pub mod auth;
 pub mod clipboard;
 pub mod commands;
 pub mod config;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod esc_hook;
 pub mod foreground;
 pub mod history;
 pub mod rewrite;
 pub mod secure_store;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod selection_watcher;
 pub mod skills;
 
@@ -49,6 +54,9 @@ pub const BUBBLE_MENU_PARKED_X: f64 = -32000.0;
 pub const BUBBLE_MENU_PARKED_Y: f64 = -32000.0;
 static BUBBLE_MENU_SUPPRESS_PROBE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "macos")]
+static PASTE_TARGET_PID: AtomicI32 = AtomicI32::new(0);
+#[cfg(target_os = "windows")]
 static PASTE_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 static PASTE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -61,6 +69,30 @@ pub fn is_bubble_menu_parked(x: i32, y: i32) -> bool {
 // stalls on the first couple of overlay opens. Remove once the hang is fixed.
 use std::sync::OnceLock;
 static TRACE_START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// The OS thread `run()` started on, captured once at startup. `run()` is
+/// invoked from `main()` before Tauri's event loop starts, and the event
+/// loop then runs on that same calling thread — so this is a reliable stand-in
+/// for "the main thread" without needing platform-specific APIs.
+///
+/// This exists to answer an open question about the macOS crash fix in
+/// `foreground::detect`/`remember_paste_target_window`/
+/// `focus_paste_target_window`: those used to call AppKit's `NSWorkspace`/
+/// `NSRunningApplication` directly from `on_hotkey`/`on_super_hotkey`, which
+/// is not *guaranteed* to run on the main thread, and that was blamed for a
+/// crash. They now marshal through `run_on_main_thread`. But it's possible
+/// the global-shortcut handler was already running on the main thread all
+/// along, in which case that marshaling is a no-op and the real crash cause
+/// is still unknown. `is_main_thread()` plus the `tid=` field `trace()`
+/// already logs on every line let a human confirm from real trace output
+/// which thread actually made the AppKit calls. See `project.md` Known Gaps.
+static MAIN_THREAD_ID: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+/// Whether the current thread is the one `run()` started on. See
+/// `MAIN_THREAD_ID` for why this exists.
+pub fn is_main_thread() -> bool {
+    MAIN_THREAD_ID.get() == Some(&std::thread::current().id())
+}
 
 /// Latched true the moment the user genuinely opens the overlay. The startup
 /// webview-warming pass shows the overlay off-screen and then hides it again —
@@ -92,7 +124,7 @@ pub fn text_fingerprint(text: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-pub fn remember_paste_target_window() {
+pub fn remember_paste_target_window(_app: &AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     let hwnd = unsafe { GetForegroundWindow().0 as isize };
@@ -100,39 +132,102 @@ pub fn remember_paste_target_window() {
     trace(&format!("remember_paste_target_window: hwnd={hwnd}"));
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn remember_paste_target_window() {}
+/// Like `foreground::detect`, this can be called from `on_hotkey`/
+/// `on_super_hotkey` off the main app thread — calling AppKit's
+/// `NSWorkspace` directly there is the same class of bug that used to crash
+/// `foreground::detect`. Marshal onto the main thread via
+/// `run_on_main_thread`. Unlike `detect`, nothing needs the result back
+/// synchronously (`PASTE_TARGET_PID` is only read later, from
+/// `focus_paste_target_window`, well after the async capture/rewrite work
+/// has had time to run), so this is fire-and-forget rather than blocking on
+/// a channel.
+#[cfg(target_os = "macos")]
+pub fn remember_paste_target_window(app: &AppHandle) {
+    use objc2_app_kit::NSWorkspace;
+
+    let _ = app.run_on_main_thread(|| {
+        let Some(running_app) = (unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() })
+        else {
+            trace("remember_paste_target_window: no frontmost app");
+            return;
+        };
+        let pid = unsafe { running_app.processIdentifier() };
+        PASTE_TARGET_PID.store(pid, Ordering::SeqCst);
+        trace(&format!("remember_paste_target_window: pid={pid}"));
+    });
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn remember_paste_target_window(_app: &AppHandle) {}
 
 #[cfg(target_os = "windows")]
-pub fn focus_paste_target_window() -> bool {
+pub fn focus_paste_target_window(_app: &AppHandle) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
 
     let hwnd = PASTE_TARGET_HWND.load(Ordering::SeqCst);
     if hwnd == 0 {
         trace("focus_paste_target_window: no hwnd stored");
-        return false;
+        return;
     }
 
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
     unsafe {
         if !IsWindow(Some(hwnd)).as_bool() {
             trace("focus_paste_target_window: hwnd no longer valid");
-            return false;
+            return;
         }
         let ok = SetForegroundWindow(hwnd).as_bool();
         trace(&format!("focus_paste_target_window: set_foreground={ok}"));
-        ok
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn focus_paste_target_window() -> bool {
-    false
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn focus_paste_target_window(_app: &AppHandle) {}
+
+/// Same class of bug as `detect_impl`/`remember_paste_target_window`: this is
+/// called from the async super-hotkey task (`on_super_hotkey`) and from the
+/// async `paste_text` command, neither of which is guaranteed to run on the
+/// main thread. Calling AppKit's `NSRunningApplication::activateWithOptions`
+/// straight from there would be the exact pattern that crashed
+/// `foreground::detect` before that fix. Marshal onto the main thread via
+/// `run_on_main_thread`, fire-and-forget — nothing downstream depends on the
+/// activation result, only tracing does (mirrors `remember_paste_target_window`).
+#[cfg(target_os = "macos")]
+pub fn focus_paste_target_window(app: &AppHandle) {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+
+    let pid = PASTE_TARGET_PID.load(Ordering::SeqCst);
+    if pid == 0 {
+        trace("focus_paste_target_window: no pid stored");
+        return;
+    }
+
+    let _ = app.run_on_main_thread(move || {
+        trace(&format!(
+            "focus_paste_target_window: on main thread is_main={}",
+            is_main_thread()
+        ));
+        let Some(running_app) =
+            (unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) })
+        else {
+            trace("focus_paste_target_window: pid no longer valid");
+            return;
+        };
+        let ok = unsafe {
+            running_app.activateWithOptions(
+                NSApplicationActivationOptions::NSApplicationActivateAllWindows,
+            )
+        };
+        trace(&format!(
+            "focus_paste_target_window: activate pid={pid} ok={ok}"
+        ));
+    });
 }
 
 pub struct AppState {
     pub captured_text: Mutex<Option<String>>,
+    pub capture_error: Mutex<Option<String>>,
     pub original_clipboard: Mutex<Option<String>>,
     /// Output format chosen from the foreground app at capture time (HTML for
     /// rich-text targets like Outlook/Gmail, plain text otherwise). Sampled
@@ -180,7 +275,7 @@ pub fn show_overlay(app: &AppHandle) {
             trace("show_overlay: set_focus start");
             let _ = w.set_focus();
             trace("show_overlay: window ops done");
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             esc_hook::start(&handle);
             trace("show_overlay: esc_hook::start done");
             return;
@@ -201,12 +296,18 @@ pub fn show_overlay(app: &AppHandle) {
 
 pub fn show_processing(app: &AppHandle) {
     let _ = app.emit("processing:show", ());
-    if let Some(w) = app.get_webview_window("processing") {
-        let _ = w.show();
-        return;
-    }
-    // Fallback if not pre-warmed
-    let _ = tauri::WebviewWindowBuilder::new(app, "processing", tauri::WebviewUrl::App("".into()))
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("processing") {
+            let _ = w.show();
+            return;
+        }
+        // Fallback if not pre-warmed.
+        let _ = tauri::WebviewWindowBuilder::new(
+            &handle,
+            "processing",
+            tauri::WebviewUrl::App("".into()),
+        )
         .title("")
         .decorations(false)
         .shadow(false)
@@ -217,6 +318,7 @@ pub fn show_processing(app: &AppHandle) {
         .center()
         .focused(false)
         .build();
+    });
 }
 
 /// Switch the processing indicator to its "out of free rewrites" state — a red
@@ -224,15 +326,21 @@ pub fn show_processing(app: &AppHandle) {
 /// visible from a prior `show_processing` call.
 pub fn show_processing_limit(app: &AppHandle) {
     let _ = app.emit("processing:limit", ());
-    if let Some(w) = app.get_webview_window("processing") {
-        let _ = w.show();
-    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("processing") {
+            let _ = w.show();
+        }
+    });
 }
 
 pub fn hide_processing(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("processing") {
-        let _ = w.hide();
-    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("processing") {
+            let _ = w.hide();
+        }
+    });
 }
 
 /// Clamp `(x, y)` (physical screen coordinates) so `window`, at its current
@@ -247,56 +355,271 @@ pub fn hide_processing(app: &AppHandle) {
 /// Uses `MonitorFromPoint`/`GetMonitorInfoW` from the `windows` crate, same as
 /// `selection_watcher.rs`'s `is_foreground_fullscreen_exclusive` (just fed a
 /// point instead of a window handle) — no new Cargo.toml dependency needed.
-#[cfg(target_os = "windows")]
-fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
+#[cfg(target_os = "macos")]
+mod mac_display {
+    //! Minimal raw FFI against `CoreGraphics` (already linked transitively via
+    //! `enigo` and directly via `esc_hook.rs`/`selection_watcher.rs`, so this
+    //! adds no new Cargo.toml dependency) to find which display contains a
+    //! point and clamp a rect to that display's bounds — the macOS analogue of
+    //! the Windows branch's `MonitorFromPoint`/`GetMonitorInfoW`.
+    //!
+    //! Coordinate space: `CGDisplayBounds` returns bounds in the same
+    //! top-left-origin global "Quartz" display coordinate space that
+    //! `CGEventTap`/`CGEventGetLocation` and the macOS Accessibility API
+    //! (`AXUIElementCopyElementAtPosition`, `kAXBoundsForRangeParameterizedAttribute`)
+    //! use — see the coordinate-space research note in `selection_watcher.rs`'s
+    //! `mod mac` for the sourcing. So the `(x, y)` this receives (built from AX
+    //! selection bounds in `show_bubble`/`show_bubble_menu`) needs no
+    //! conversion before being compared against `CGDisplayBounds`, unlike
+    //! AppKit's `NSScreen`/`NSView` bottom-left-origin "flipped" space.
+    //!
+    //! Uses full display bounds (`CGDisplayBounds`), not a "work area" that
+    //! excludes the menu bar/dock — `CoreGraphics` has no direct equivalent of
+    //! Win32's `GetMonitorInfoW` work-area rect; the AppKit equivalent
+    //! (`NSScreen.visibleFrame`) is a main-thread-only AppKit call, which would
+    //! need marshaling this is intentionally avoiding since bubble/menu
+    //! positioning already runs on the main thread via `run_on_main_thread`
+    //! elsewhere in this file, and pulling in an extra main-thread round trip
+    //! just for the visible-frame variant isn't worth it for a small floating
+    //! bubble that just needs to stay on-screen. Documented as a known
+    //! limitation: a bubble positioned very close to the menu bar/dock could
+    //! still overlap it slightly.
+    type CGDirectDisplayID = u32;
+    type CGError = i32;
 
-    let pt = POINT {
-        x: x as i32,
-        y: y as i32,
-    };
-    let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }
-        .ok()
-        .is_err()
-    {
-        // No monitor info available — fall back to the raw, unclamped point
-        // rather than guessing.
-        return (x, y);
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
     }
 
-    let work = info.rcWork;
-    let min_x = work.left as f64;
-    let max_x = (work.right as f64 - w).max(min_x);
-    let min_y = work.top as f64;
-    let max_y = (work.bottom as f64 - h).max(min_y);
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
 
-    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGGetDisplaysWithPoint(
+            point: CGPoint,
+            max_displays: u32,
+            displays: *mut CGDirectDisplayID,
+            matching_display_count: *mut u32,
+        ) -> CGError;
+        fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
+    }
+
+    /// Pure clamp math, factored out so it's unit-testable without any FFI
+    /// call — mirrors the Windows branch's `x.clamp(min_x, max_x)` logic
+    /// exactly, just parameterized on the display bounds instead of reading
+    /// them from `GetMonitorInfoW` inline.
+    pub(super) fn clamp_point_to_bounds(
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        bounds: (f64, f64, f64, f64), // (left, top, right, bottom)
+    ) -> (f64, f64) {
+        let (left, top, right, bottom) = bounds;
+        let min_x = left;
+        let max_x = (right - w).max(min_x);
+        let min_y = top;
+        let max_y = (bottom - h).max(min_y);
+        (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+    }
+
+    /// `None` if no display contains `(x, y)` (e.g. already off every screen) —
+    /// callers should fall back to the raw unclamped point rather than guess.
+    pub(super) fn display_bounds_containing(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+        unsafe {
+            let point = CGPoint { x, y };
+            let mut display: CGDirectDisplayID = 0;
+            let mut count: u32 = 0;
+            let err = CGGetDisplaysWithPoint(point, 1, &mut display, &mut count);
+            if err != 0 || count == 0 {
+                return None;
+            }
+            let bounds = CGDisplayBounds(display);
+            Some((
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.origin.x + bounds.size.width,
+                bounds.origin.y + bounds.size.height,
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn clamps_inside_bounds_unchanged() {
+            let bounds = (0.0, 0.0, 1920.0, 1080.0);
+            assert_eq!(
+                clamp_point_to_bounds(500.0, 300.0, 168.0, 180.0, bounds),
+                (500.0, 300.0)
+            );
+        }
+
+        #[test]
+        fn clamps_past_right_and_bottom_edge() {
+            let bounds = (0.0, 0.0, 1920.0, 1080.0);
+            assert_eq!(
+                clamp_point_to_bounds(1900.0, 1070.0, 168.0, 180.0, bounds),
+                (1920.0 - 168.0, 1080.0 - 180.0)
+            );
+        }
+
+        #[test]
+        fn clamps_past_left_and_top_edge() {
+            let bounds = (0.0, 0.0, 1920.0, 1080.0);
+            assert_eq!(
+                clamp_point_to_bounds(-50.0, -20.0, 168.0, 180.0, bounds),
+                (0.0, 0.0)
+            );
+        }
+
+        #[test]
+        fn window_larger_than_display_clamps_to_min() {
+            // Degenerate case: window wider/taller than the display itself —
+            // must not invert min/max (mirrors the Windows branch's
+            // `.max(min_x)` guard).
+            let bounds = (0.0, 0.0, 100.0, 100.0);
+            assert_eq!(
+                clamp_point_to_bounds(0.0, 0.0, 500.0, 500.0, bounds),
+                (0.0, 0.0)
+            );
+        }
+
+        #[test]
+        fn handles_secondary_display_with_negative_origin() {
+            // A display positioned to the left of/above the primary display has
+            // negative-origin bounds in Quartz global space; clamp math must
+            // still work correctly (not implicitly assume origin is (0, 0)).
+            let bounds = (-1920.0, 0.0, 0.0, 1080.0);
+            // Fully inside: right edge (-300 + 168 = -132) stays left of the
+            // display's right edge (0), so it's untouched.
+            assert_eq!(
+                clamp_point_to_bounds(-300.0, 300.0, 168.0, 180.0, bounds),
+                (-300.0, 300.0)
+            );
+            // Past the right edge: right edge (-10 + 168 = 158) would cross
+            // past 0, so it clamps back to max_x = 0 - 168 = -168.
+            assert_eq!(
+                clamp_point_to_bounds(-10.0, 300.0, 168.0, 180.0, bounds),
+                (-168.0, 300.0)
+            );
+        }
+    }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        return match mac_display::display_bounds_containing(x, y) {
+            Some(bounds) => mac_display::clamp_point_to_bounds(x, y, w, h, bounds),
+            // No display contains the raw point (e.g. it's already off every
+            // screen) — fall back to the raw point rather than guess, same
+            // policy as the Windows branch's "no monitor info" fallback below.
+            None => (x, y),
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+
+        let pt = POINT {
+            x: x as i32,
+            y: y as i32,
+        };
+        let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(hmonitor, &mut info) }
+            .ok()
+            .is_err()
+        {
+            // No monitor info available — fall back to the raw, unclamped point
+            // rather than guessing.
+            return (x, y);
+        }
+
+        let work = info.rcWork;
+        let min_x = work.left as f64;
+        let max_x = (work.right as f64 - w).max(min_x);
+        let min_y = work.top as f64;
+        let max_y = (work.bottom as f64 - h).max(min_y);
+
+        (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn clamp_to_monitor(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
-    let (w, h) = window
-        .outer_size()
-        .map(|s| (s.width as f64, s.height as f64))
-        .unwrap_or((0.0, 0.0));
-    clamp_rect_to_monitor(x, y, w, h)
+    #[cfg(target_os = "macos")]
+    {
+        // Unit consistency, not just at the final `set_position` call: `x, y`
+        // here (and the `CGDisplayBounds` values `clamp_rect_to_monitor`'s
+        // macOS branch compares them against) are in points — the same unit
+        // Cocoa/Quartz uses everywhere on macOS, which is exactly what Tauri
+        // calls "logical" pixels there (NOT "physical", which is
+        // points * backingScaleFactor). `window.outer_size()` returns
+        // Tauri's `PhysicalSize` (device pixels) regardless of platform, so
+        // using it here directly would mix pixel-space `w`/`h` into a
+        // point-space clamp — on any Retina display (scale factor 2, the
+        // overwhelming majority of real Macs) that over-subtracts near the
+        // display's right/bottom edge by roughly 2x the window's true
+        // point-space size. Convert to logical/points via the window's own
+        // scale factor before handing off to the shared clamp math.
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let (w, h) = window
+            .outer_size()
+            .map(|s| {
+                let logical = s.to_logical::<f64>(scale);
+                (logical.width, logical.height)
+            })
+            .unwrap_or((0.0, 0.0));
+        return clamp_rect_to_monitor(x, y, w, h);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: UIA selection rects and `GetWindowRect`/monitor info are
+        // already all in physical pixels, matching `outer_size()` directly —
+        // no conversion needed here.
+        let (w, h) = window
+            .outer_size()
+            .map(|s| (s.width as f64, s.height as f64))
+            .unwrap_or((0.0, 0.0));
+        clamp_rect_to_monitor(x, y, w, h)
+    }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn clamp_rect_to_monitor(x: f64, y: f64, _w: f64, _h: f64) -> (f64, f64) {
     (x, y)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn clamp_to_monitor(_window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
@@ -322,13 +645,18 @@ pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
             // the visible ring itself.
             let (x, y) = clamp_to_monitor(
                 &w,
-                x + BUBBLE_ANCHOR_CENTER_OFFSET_X
-                    - BUBBLE_VISIBLE_SIZE / 2.0
-                    - BUBBLE_HIT_PADDING,
-                y + BUBBLE_ANCHOR_CENTER_OFFSET_Y
-                    - BUBBLE_VISIBLE_SIZE / 2.0
-                    - BUBBLE_HIT_PADDING,
+                x + BUBBLE_ANCHOR_CENTER_OFFSET_X - BUBBLE_VISIBLE_SIZE / 2.0 - BUBBLE_HIT_PADDING,
+                y + BUBBLE_ANCHOR_CENTER_OFFSET_Y - BUBBLE_VISIBLE_SIZE / 2.0 - BUBBLE_HIT_PADDING,
             );
+            // `(x, y)` here is in physical pixels on Windows (UIA's native
+            // unit) but points on macOS (AX/CGEventTap's native unit, which
+            // is exactly Tauri's "logical" position there) — see
+            // `clamp_to_monitor`'s doc comment. Using `PhysicalPosition` on
+            // macOS would place the bubble at roughly half the intended
+            // position on any Retina display.
+            #[cfg(target_os = "macos")]
+            let _ = w.set_position(LogicalPosition::new(x, y));
+            #[cfg(not(target_os = "macos"))]
             let _ = w.set_position(PhysicalPosition::new(x, y));
             // Re-toggling always-on-top moves the window to the very top of
             // the topmost band, ahead of any other always-on-top window (some
@@ -379,6 +707,7 @@ fn suppress_bubble_menu_outside_click() {
         .store(now_ms() + BUBBLE_MENU_OPEN_CLICK_GRACE_MS, Ordering::SeqCst);
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn bubble_menu_outside_click_suppressed() -> bool {
     now_ms() < BUBBLE_MENU_IGNORE_OUTSIDE_CLICK_UNTIL_MS.load(Ordering::SeqCst)
 }
@@ -404,6 +733,11 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
 
         if let Some(w) = handle.get_webview_window("bubble_menu") {
             let _ = w.set_size(LogicalSize::new(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT));
+            // Same points-vs-physical-pixels distinction as `show_bubble` —
+            // see that call site's comment.
+            #[cfg(target_os = "macos")]
+            let _ = w.set_position(LogicalPosition::new(x, y));
+            #[cfg(not(target_os = "macos"))]
             let _ = w.set_position(PhysicalPosition::new(x, y));
             let _ = w.set_always_on_top(false);
             let _ = w.set_always_on_top(true);
@@ -451,12 +785,17 @@ fn hide_bubble_menu_inner(app: &AppHandle, suppress_probe: bool) {
 /// of a click, from the low-level mouse hook in `selection_watcher.rs`) falls
 /// outside its window bounds, closes it. This is the primary "click outside
 /// closes the menu" mechanism — driven directly off the same global mouse
-/// hook that already handles selection detection, rather than the WebView2
-/// focus/blur events `BubbleMenu.tsx` also listens for, since those have
-/// proven unreliable cross-app (a window's OS focus state on Windows can lag
-/// or fail to transfer depending on how it was shown). All window queries run
-/// on the main thread, like every other window operation in this file.
-#[cfg(target_os = "windows")]
+/// hook that already handles selection detection, rather than the WebView2/
+/// WKWebView focus/blur events `BubbleMenu.tsx` also listens for, since those
+/// have proven unreliable cross-app (a window's OS focus state can lag or
+/// fail to transfer depending on how it was shown — a Windows-observed issue,
+/// but the same class of race is plausible on macOS too, so the mac backend
+/// uses this same mouse-hook-driven mechanism rather than trusting WKWebView
+/// blur). All window queries run on the main thread, like every other window
+/// operation in this file. Body is pure cross-platform Tauri window API calls
+/// (`get_webview_window`/`outer_position`/`outer_size`/`run_on_main_thread`) —
+/// nothing Windows-specific — so this is shared by both hook backends.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn maybe_close_bubble_menu_on_outside_click(
     app: &AppHandle,
     x: i32,
@@ -480,10 +819,34 @@ pub fn maybe_close_bubble_menu_on_outside_click(
         }
         let inside = match w.outer_size() {
             Ok(size) => {
-                x >= cur_pos.x
-                    && x <= cur_pos.x + size.width as i32
-                    && y >= cur_pos.y
-                    && y <= cur_pos.y + size.height as i32
+                // Same points-vs-physical-pixels distinction as
+                // `clamp_to_monitor`/`show_bubble`: on macOS `x, y` arrive in
+                // points (from the mac tap callback's `CGEventGetLocation`),
+                // but `cur_pos`/`size` are Tauri's `PhysicalPosition`/
+                // `PhysicalSize` (device pixels) on every platform. Comparing
+                // them directly on a Retina Mac would make this hit-test
+                // wrong by roughly 2x — a genuine outside click could still
+                // numerically land "inside" the (larger, pixel-space) window
+                // rect, so the bubble menu would fail to close on some
+                // outside clicks. Convert the window's bounds down to
+                // logical/points on macOS before comparing; Windows keeps
+                // comparing physical-to-physical directly, since UIA/
+                // `GetWindowRect` are already both physical there.
+                #[cfg(target_os = "macos")]
+                {
+                    let scale = w.scale_factor().unwrap_or(1.0);
+                    let pos = cur_pos.to_logical::<f64>(scale);
+                    let size = size.to_logical::<f64>(scale);
+                    let (x, y) = (x as f64, y as f64);
+                    x >= pos.x && x <= pos.x + size.width && y >= pos.y && y <= pos.y + size.height
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    x >= cur_pos.x
+                        && x <= cur_pos.x + size.width as i32
+                        && y >= cur_pos.y
+                        && y <= cur_pos.y + size.height as i32
+                }
             }
             // Bounds unknowable — don't close on a guess.
             Err(_) => true,
@@ -691,7 +1054,10 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
 // ── Hotkey handlers ───────────────────────────────────────────────────────────
 
 fn on_hotkey(app: &AppHandle) {
-    trace("on_hotkey: enter");
+    // Diagnostic for the macOS main-thread question — see `MAIN_THREAD_ID`.
+    // `trace()` already logs `tid=` on every line; `is_main` here is the
+    // explicit comparison against the thread `run()` started on.
+    trace(&format!("on_hotkey: enter is_main={}", is_main_thread()));
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -699,8 +1065,9 @@ fn on_hotkey(app: &AppHandle) {
     // Sample the foreground app now, while the target still has focus — before
     // the overlay steals it — so we know whether to emit HTML or plain text.
     trace("on_hotkey: foreground::detect start");
+    let detected_fmt = foreground::detect(app);
     if let Ok(mut fmt) = state.foreground_format.lock() {
-        *fmt = foreground::detect();
+        *fmt = detected_fmt;
     }
     trace("on_hotkey: foreground::detect done");
 
@@ -709,8 +1076,7 @@ fn on_hotkey(app: &AppHandle) {
         return;
     }
 
-    #[cfg(target_os = "windows")]
-    remember_paste_target_window();
+    remember_paste_target_window(app);
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -721,16 +1087,30 @@ fn on_hotkey(app: &AppHandle) {
         if let Some(s) = app.try_state::<AppState>() {
             s.is_capturing.store(false, Ordering::SeqCst);
 
-            let (text_val, orig_val) = match result {
-                Ok(Ok((text, original))) => (
-                    (!text.is_empty()).then_some(text),
-                    (!original.is_empty()).then_some(original),
+            let (text_val, orig_val, err_val) = match result {
+                Ok(Ok((text, original))) => {
+                    let err = text.is_empty().then(|| {
+                        "No text captured. Make sure text is still highlighted and reWrite has macOS Accessibility permission.".to_string()
+                    });
+                    (
+                        (!text.is_empty()).then_some(text),
+                        (!original.is_empty()).then_some(original),
+                        err,
+                    )
+                }
+                Ok(Err(e)) => (None, None, Some(e.to_string())),
+                Err(e) => (
+                    None,
+                    None,
+                    Some(format!("Selection capture task failed: {e}")),
                 ),
-                _ => (None, None),
             };
 
             if let Ok(mut g) = s.captured_text.lock() {
                 *g = text_val;
+            }
+            if let Ok(mut g) = s.capture_error.lock() {
+                *g = err_val;
             }
             if let Ok(mut g) = s.original_clipboard.lock() {
                 *g = orig_val;
@@ -757,7 +1137,13 @@ impl Drop for RewriteGuard {
 }
 
 fn on_super_hotkey(app: &AppHandle) {
+    // Diagnostic for the macOS main-thread question — see `MAIN_THREAD_ID`.
+    trace(&format!(
+        "on_super_hotkey: enter is_main={}",
+        is_main_thread()
+    ));
     let Some(state) = app.try_state::<AppState>() else {
+        trace("on_super_hotkey: no AppState");
         return;
     };
 
@@ -765,12 +1151,14 @@ fn on_super_hotkey(app: &AppHandle) {
     // while a rewrite is running is dropped silently. Set this BEFORE
     // `show_processing` so the second press shows nothing.
     if state.is_rewriting.swap(true, Ordering::SeqCst) {
+        trace("on_super_hotkey: already rewriting, bail");
         return;
     }
 
     if state.is_capturing.swap(true, Ordering::SeqCst) {
         // A capture (from either hotkey) is already in flight; release the
         // rewrite reservation we just took before bailing.
+        trace("on_super_hotkey: already capturing, bail");
         state.is_rewriting.store(false, Ordering::SeqCst);
         return;
     }
@@ -779,14 +1167,14 @@ fn on_super_hotkey(app: &AppHandle) {
     // press can't overwrite the in-flight rewrite's format) but before
     // `show_processing` below steals focus, so the decision reflects the user's
     // real target app.
+    trace("on_super_hotkey: foreground::detect start");
+    let detected_fmt = foreground::detect(app);
     if let Ok(mut fmt) = state.foreground_format.lock() {
-        *fmt = foreground::detect();
+        *fmt = detected_fmt;
     }
+    trace("on_super_hotkey: foreground::detect done");
 
-    #[cfg(target_os = "windows")]
-    remember_paste_target_window();
-
-    show_processing(app);
+    remember_paste_target_window(app);
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -794,9 +1182,12 @@ fn on_super_hotkey(app: &AppHandle) {
         // success path at the end of this async block.
         let _rewrite_guard = RewriteGuard { app: app.clone() };
 
+        trace("on_super_hotkey: capture_selection start");
         let capture_result = tokio::task::spawn_blocking(clipboard::capture_selection).await;
+        trace("on_super_hotkey: capture_selection done");
 
         let Some(state) = app.try_state::<AppState>() else {
+            trace("on_super_hotkey: no AppState after capture");
             hide_processing(&app);
             return;
         };
@@ -805,17 +1196,30 @@ fn on_super_hotkey(app: &AppHandle) {
         // Require auth — refresh the token on demand if it has expired, so a
         // long-running session doesn't send a stale JWT and get a 401.
         let Some(access_token) = ensure_valid_token(&app).await else {
+            trace("on_super_hotkey: no valid token");
             hide_processing(&app);
             return;
         };
 
         let (text, original) = match capture_result {
             Ok(Ok((t, o))) if !t.is_empty() => (t, o),
-            _ => {
-                hide_processing(&app);
+            Ok(Ok((_t, _o))) => {
+                trace("on_super_hotkey: empty capture");
+                return;
+            }
+            Ok(Err(e)) => {
+                trace(&format!("on_super_hotkey: capture error: {e}"));
+                return;
+            }
+            Err(e) => {
+                trace(&format!("on_super_hotkey: capture task failed: {e}"));
                 return;
             }
         };
+
+        trace("on_super_hotkey: show_processing start");
+        show_processing(&app);
+        trace("on_super_hotkey: show_processing done");
 
         if let Ok(mut g) = state.captured_text.lock() {
             *g = Some(text.clone());
@@ -863,6 +1267,7 @@ fn on_super_hotkey(app: &AppHandle) {
             {
                 Ok(o) => o,
                 Err(e) => {
+                    trace(&format!("on_super_hotkey: rewrite API error: {e}"));
                     if is_limit_error(&e.to_string()) {
                         // Show the red "out of free rewrites" glow briefly, then dismiss.
                         show_processing_limit(&app);
@@ -908,10 +1313,7 @@ fn on_super_hotkey(app: &AppHandle) {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            focus_paste_target_window();
-        }
+        focus_paste_target_window(&app);
         let paste_trace_id = next_paste_trace_id();
         trace(&format!(
             "paste#{paste_trace_id}: super-hotkey paste scheduled format={format:?} output={} original_len={} restore={} restore_delay_ms={} paste_delay_ms={}",
@@ -949,6 +1351,10 @@ fn on_super_hotkey(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Capture "the main thread" before anything else runs. See
+    // `MAIN_THREAD_ID` for why.
+    let _ = MAIN_THREAD_ID.set(std::thread::current().id());
+
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     tauri::Builder::default()
@@ -986,6 +1392,7 @@ pub fn run() {
         )
         .manage(AppState {
             captured_text: Mutex::new(None),
+            capture_error: Mutex::new(None),
             original_clipboard: Mutex::new(None),
             foreground_format: Mutex::new(foreground::OutputFormat::default()),
             config: Mutex::new(config::Config::default()),
@@ -1015,6 +1422,7 @@ pub fn run() {
             }
             let hotkey = loaded_config.hotkey.clone();
             let super_hotkey = loaded_config.super_hotkey.clone();
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             let bubble_enabled = loaded_config.bubble_enabled;
             *app.state::<AppState>().config.lock().unwrap() = loaded_config;
 
@@ -1117,8 +1525,10 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
-                // Register the scheme in the Windows registry during development
-                #[cfg(debug_assertions)]
+                // Register the scheme in the Windows registry during development.
+                // Runtime registration is unsupported on macOS; packaged builds
+                // get their scheme registration from tauri.conf.json instead.
+                #[cfg(all(debug_assertions, target_os = "windows"))]
                 app.deep_link().register_all()?;
 
                 let app_handle = app.handle().clone();
@@ -1157,7 +1567,7 @@ pub fn run() {
             // selection_watcher.rs) — on by default, but user-toggleable via
             // Settings (Sprint 4's `bubble_enabled` config flag) for RTS-style
             // click-drag games / users who find the popup intrusive.
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             if bubble_enabled {
                 selection_watcher::start(app.handle());
             }
@@ -1184,7 +1594,7 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = overlay_ref.hide();
-                        #[cfg(target_os = "windows")]
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
                         esc_hook::stop();
                     }
                 });
@@ -1281,6 +1691,13 @@ pub fn run() {
                 BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
             )
             .focused(false)
+            // Without this, macOS treats a click on this (deliberately
+            // unfocused, so it doesn't steal focus from the source app)
+            // window as pure activation and never delivers it to the
+            // webview's JS click handler — the bubble visibly appears but
+            // clicking it does nothing. This is Tauri/wry's wrapper around
+            // `NSWindow.acceptsFirstMouse`; harmless on non-macOS targets.
+            .accept_first_mouse(true)
             .visible(false)
             .build()
             {
@@ -1312,6 +1729,10 @@ pub fn run() {
             .inner_size(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT)
             .position(BUBBLE_MENU_PARKED_X, BUBBLE_MENU_PARKED_Y)
             .focused(false)
+            // Same fix as the bubble window above — without this, clicking a
+            // skill in this unfocused menu would be swallowed as pure window
+            // activation on macOS instead of reaching the click handler.
+            .accept_first_mouse(true)
             .visible(true)
             .build()
             {
@@ -1328,7 +1749,7 @@ pub fn run() {
             // Always-on background service (see selection_watcher.rs) emits these
             // two events from its own worker thread; react by showing/hiding the
             // bubble. Registered once, for the app's lifetime.
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
                 let app_handle = app.handle().clone();
                 app.listen("selection:detected", move |event| {
@@ -1407,10 +1828,26 @@ pub fn run() {
                 show_settings(app.handle());
             }
 
+            // ── macOS: Accessibility permission tutorial (roadmap-mac.md Phase 2) ──
+            // If Accessibility isn't granted, surface Settings immediately on
+            // launch so the user lands on the tutorial (`AccessibilityView.tsx`,
+            // shown by `Settings.tsx` when `check_accessibility_permission`
+            // comes back false) instead of discovering it later via a silently
+            // failing hotkey. `is_first_run` already opened Settings above (and
+            // the frontend will detect the missing permission on mount and
+            // switch straight to the tutorial view), so this only needs to
+            // handle the non-first-run case. Non-macOS builds don't have this
+            // permission concept, so behavior there is unchanged.
+            #[cfg(target_os = "macos")]
+            if !is_first_run && !clipboard::accessibility_trusted(false) {
+                show_settings(app.handle());
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_captured_text,
+            commands::get_capture_error,
             commands::rewrite_with_skill,
             commands::paste_text,
             commands::get_config,
@@ -1436,6 +1873,9 @@ pub fn run() {
             commands::bubble_clicked,
             commands::close_bubble_menu,
             commands::debug_trace,
+            commands::check_accessibility_permission,
+            commands::request_accessibility_permission,
+            commands::open_accessibility_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,4 +6,4 @@ export interface AuthState {
   rewrite_count: number;
 }
 
-export type ActiveView = "home" | "history" | "skills" | "settings";
+export type ActiveView = "home" | "history" | "skills" | "settings" | "accessibility";

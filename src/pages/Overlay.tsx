@@ -15,6 +15,7 @@ export default function Overlay() {
   const [status, _setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [capturedText, setCapturedText] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
   const [items, setItems] = useState<SkillItem[]>(EMPTY_SKILL_ITEMS);
   const [focusedIndex, setFocusedIndex] = useState(0);
 
@@ -42,11 +43,13 @@ export default function Overlay() {
   }, [setStatus]);
 
   const refreshData = useCallback(async () => {
-    const [text, cfg] = await Promise.all([
+    const [text, captureErr, cfg] = await Promise.all([
       invoke<string | null>("get_captured_text"),
+      invoke<string | null>("get_capture_error"),
       invoke<SkillsConfig>("get_skills_config"),
     ]);
     setCapturedText(text);
+    setCaptureError(captureErr);
     const list = buildItems(cfg);
     setItems(list);
     itemsRef.current = list;
@@ -155,8 +158,8 @@ export default function Overlay() {
       <div style={{
         position: "relative",
         width: "100%", height: "100%", borderRadius: 18,
-        border: "1px solid #e0e1e4",
-        background: "#fff",
+        border: "1px solid var(--rw-border)",
+        background: "var(--rw-bg-primary)",
         boxShadow: "0 8px 40px rgba(20,20,26,.16), 0 2px 8px rgba(20,20,26,.08)",
         padding: "20px 20px 16px",
         display: "flex", flexDirection: "column",
@@ -171,18 +174,18 @@ export default function Overlay() {
             position: "absolute", top: 12, right: 12,
             width: 26, height: 26, borderRadius: 8,
             border: "none", background: "transparent",
-            color: "#b6b9bf", cursor: "pointer",
+            color: "var(--rw-text-faint)", cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: 18, lineHeight: 1, padding: 0,
             transition: "background .1s, color .1s",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = "#f0f1f3";
-            e.currentTarget.style.color = "#16161a";
+            e.currentTarget.style.background = "var(--rw-divider)";
+            e.currentTarget.style.color = "var(--rw-text-primary)";
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.background = "transparent";
-            e.currentTarget.style.color = "#b6b9bf";
+            e.currentTarget.style.color = "var(--rw-text-faint)";
           }}
         >
           ×
@@ -190,24 +193,24 @@ export default function Overlay() {
         {/* Header */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-            <span style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 15, color: "#16161a", letterSpacing: -.2 }}>
+            <span style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 15, color: "var(--rw-text-primary)", letterSpacing: -.2 }}>
               How should this be rewritten?
             </span>
           </div>
           {preview && (
-            <p style={{ fontSize: 12, color: "#a7aab0", paddingLeft: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <p style={{ fontSize: 12, color: "var(--rw-text-faint)", paddingLeft: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               "{preview}"
             </p>
           )}
           {!capturedText && status === "idle" && (
-            <p style={{ fontSize: 12, color: "#c0392b", paddingLeft: 0 }}>
-              No text captured. Highlight some text first.
+            <p style={{ fontSize: 12, color: "var(--rw-danger)", paddingLeft: 0 }}>
+              {captureError ?? "No text captured. Highlight some text first."}
             </p>
           )}
         </div>
 
         {/* Divider */}
-        <div style={{ height: 1, background: "#f0f1f3", margin: "0 -20px 12px" }} />
+        <div style={{ height: 1, background: "var(--rw-divider)", margin: "0 -20px 12px" }} />
 
         {/* Skills list */}
         {status !== "loading" && (
@@ -224,19 +227,19 @@ export default function Overlay() {
                       width: "100%", textAlign: "left",
                       padding: "9px 12px",
                       borderRadius: 10,
-                      border: `1px solid ${focused ? "#16161a" : "#e8e9ec"}`,
-                      background: focused ? "#16161a" : "#fff",
+                      border: `1px solid ${focused ? "var(--rw-accent)" : "var(--rw-border)"}`,
+                      background: focused ? "var(--rw-accent)" : "var(--rw-bg-primary)",
                       cursor: "pointer",
                       transition: "background .1s, border-color .1s",
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                       {focused && (
-                        <span style={{ color: "#fff", fontSize: 12, lineHeight: 1, flexShrink: 0 }}>›</span>
+                        <span style={{ color: "var(--rw-on-accent)", fontSize: 12, lineHeight: 1, flexShrink: 0 }}>›</span>
                       )}
                       <span style={{
                         fontSize: 13.5, fontWeight: 600,
-                        color: focused ? "#fff" : "#1f2026",
+                        color: focused ? "var(--rw-on-accent)" : "var(--rw-text-primary)",
                         paddingLeft: focused ? 0 : 19,
                       }}>
                         {item.name}
@@ -244,7 +247,7 @@ export default function Overlay() {
                     </div>
                     {focused && item.description && (
                       <p style={{
-                        fontSize: 11.5, color: "rgba(255,255,255,.55)",
+                        fontSize: 11.5, color: "var(--rw-on-accent-muted)",
                         marginTop: 3, paddingLeft: 19,
                         lineHeight: 1.45,
                         display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
@@ -259,7 +262,7 @@ export default function Overlay() {
 
             {status === "error" && error && (
               isLimitError(error) ? (
-                <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8, lineHeight: 1.5 }}>
+                <p style={{ fontSize: 12, color: "var(--rw-danger)", marginBottom: 8, lineHeight: 1.5 }}>
                   You have used up your free trial limit. Please{" "}
                   <a
                     onClick={() => {
@@ -269,18 +272,18 @@ export default function Overlay() {
                       getCurrentWindow().hide();
                       invoke("open_settings").catch(() => {});
                     }}
-                    style={{ color: "#c0392b", fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
+                    style={{ color: "var(--rw-danger)", fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
                   >
                     renew to Pro or Max plans
                   </a>{" "}
                   to continue using reWrite.
                 </p>
               ) : (
-                <p style={{ fontSize: 12, color: "#c0392b", marginBottom: 8 }}>{error}</p>
+                <p style={{ fontSize: 12, color: "var(--rw-danger)", marginBottom: 8 }}>{error}</p>
               )
             )}
 
-            <p style={{ fontSize: 11, color: "#c4c6cb", textAlign: "center", letterSpacing: .2 }}>
+            <p style={{ fontSize: 11, color: "var(--rw-text-faint)", textAlign: "center", letterSpacing: .2 }}>
               ↑↓ navigate · Enter select · Esc dismiss
             </p>
           </>
@@ -295,14 +298,14 @@ export default function Overlay() {
                   key={i}
                   style={{
                     width: 6, height: 6, borderRadius: "50%",
-                    background: "#16161a",
+                    background: "var(--rw-accent)",
                     animation: "bounce 1s infinite",
                     animationDelay: `${i * 150}ms`,
                   }}
                 />
               ))}
             </div>
-            <p style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "#9a9da3" }}>Rewriting…</p>
+            <p style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "var(--rw-text-faint)" }}>Rewriting…</p>
           </div>
         )}
       </div>

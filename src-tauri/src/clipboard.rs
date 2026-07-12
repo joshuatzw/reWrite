@@ -13,12 +13,30 @@ fn copy_paste_mod() -> Key {
     }
 }
 
+fn shortcut_letter_key(c: char) -> Key {
+    #[cfg(target_os = "macos")]
+    {
+        match c {
+            // Avoid Key::Unicode on macOS: Enigo resolves it through HIToolbox's
+            // current input source APIs, which assert main-queue usage and can
+            // crash when capture/paste runs on a Tokio blocking worker.
+            'c' | 'C' => Key::Other(8),
+            'v' | 'V' => Key::Other(9),
+            _ => Key::Unicode(c),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Key::Unicode(c)
+    }
+}
+
 /// Block until the user has physically released every modifier key that could
-/// be held from the triggering hotkey (Ctrl/Shift/Alt/Win), or until `timeout`
-/// elapses. This is essential before we synthesize Ctrl+C: if the user's
-/// physical Ctrl-up lands in the middle of our synthetic Ctrl+C, the `c` is
-/// seen without a modifier and gets typed as a literal character — overwriting
-/// the user's selection. Waiting for release closes that race.
+/// be held from the triggering hotkey, or until `timeout` elapses. This is
+/// essential before we synthesize Cmd/Ctrl+C: if the user's physical modifier-up
+/// lands in the middle of our synthetic copy chord, the `c` can be seen without
+/// its modifier, or as the wrong shifted shortcut.
 #[cfg(target_os = "windows")]
 fn wait_for_modifiers_release(timeout: Duration) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -46,14 +64,125 @@ fn wait_for_modifiers_release(timeout: Duration) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn wait_for_modifiers_release(timeout: Duration) {
+    type CGKeyCode = u16;
+    type CGEventSourceStateID = i32;
+
+    const HID_SYSTEM_STATE: CGEventSourceStateID = 1;
+    const KEYS: [CGKeyCode; 8] = [
+        55, // left command
+        54, // right command
+        56, // left shift
+        60, // right shift
+        58, // left option
+        61, // right option
+        59, // left control
+        62, // right control
+    ];
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceKeyState(state_id: CGEventSourceStateID, key: CGKeyCode) -> bool;
+    }
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let any_down = KEYS
+            .iter()
+            .any(|&key| unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, key) });
+        if !any_down || std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn wait_for_modifiers_release(_timeout: Duration) {}
+
+/// `pub(crate)` (not just module-private) so `commands.rs` can expose it to
+/// the frontend via `check_accessibility_permission` / `request_accessibility_permission`
+/// (see Phase 2 of `roadmap-mac.md`, the Accessibility permission tutorial).
+#[cfg(target_os = "macos")]
+pub(crate) fn accessibility_trusted(prompt: bool) -> bool {
+    use core::ffi::c_void;
+
+    type CFAllocatorRef = *const c_void;
+    type CFDictionaryRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFTypeRef = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: CFTypeRef;
+        fn CFDictionaryCreate(
+            allocator: CFAllocatorRef,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFDictionaryRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    if unsafe { AXIsProcessTrusted() } {
+        return true;
+    }
+
+    if prompt {
+        let key = unsafe { kAXTrustedCheckOptionPrompt as *const c_void };
+        let value = unsafe { kCFBooleanTrue as *const c_void };
+        let options = unsafe {
+            CFDictionaryCreate(
+                core::ptr::null(),
+                &key,
+                &value,
+                1,
+                core::ptr::null(),
+                core::ptr::null(),
+            )
+        };
+        if !options.is_null() {
+            let _ = unsafe { AXIsProcessTrustedWithOptions(options) };
+            unsafe { CFRelease(options as CFTypeRef) };
+        }
+    }
+
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn accessibility_error_message() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown executable path".to_string());
+
+    format!(
+        "macOS Accessibility permission is still not trusted for this running dev binary:\n{exe}\n\nIn System Settings > Privacy & Security > Accessibility, remove any stale reWrite/rewrite entries, add or enable this exact binary if it appears, then fully quit and restart the dev app."
+    )
+}
+
 /// Simulate Cmd/Ctrl+C to copy the current selection.
 /// Returns (selected_text, previous_clipboard_contents).
 pub fn capture_selection() -> Result<(String, String)> {
+    #[cfg(target_os = "macos")]
+    if !accessibility_trusted(true) {
+        anyhow::bail!(accessibility_error_message());
+    }
+
     // The hotkey fires on key-press while the user is still physically holding
     // the modifier(s). Wait for them to let go before we synthesize anything —
     // if a physical Ctrl-up interleaves with our synthetic Ctrl+C, the `c` is
     // typed literally and overwrites the user's selection.
-    #[cfg(target_os = "windows")]
     wait_for_modifiers_release(Duration::from_millis(1000));
 
     // Belt-and-suspenders: also release the modifiers synthetically so nothing
@@ -79,19 +208,30 @@ pub fn capture_selection() -> Result<(String, String)> {
     // give it a beat to register before pressing `c`, so the key is never seen
     // without its modifier.
     let modifier = copy_paste_mod();
+    let copy_key = shortcut_letter_key('c');
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(modifier, Direction::Press)?;
     thread::sleep(Duration::from_millis(40));
-    enigo.key(Key::Unicode('c'), Direction::Press)?;
+    enigo.key(copy_key, Direction::Press)?;
     thread::sleep(Duration::from_millis(20));
-    enigo.key(Key::Unicode('c'), Direction::Release)?;
+    enigo.key(copy_key, Direction::Release)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
 
-    // Wait for the source app to fill the clipboard.
-    thread::sleep(Duration::from_millis(200));
-
-    let captured = Clipboard::new()?.get_text().unwrap_or_default();
+    // Wait for the source app to fill the clipboard. Some macOS apps update
+    // the pasteboard asynchronously after Cmd+C, so poll briefly instead of
+    // assuming a fixed 200ms delay is enough.
+    let mut captured = String::new();
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(50));
+        captured = Clipboard::new()?.get_text().unwrap_or_default();
+        if !captured.is_empty() {
+            break;
+        }
+    }
+    if captured.is_empty() && !original.is_empty() {
+        let _ = Clipboard::new()?.set_text(original.clone());
+    }
     Ok((captured, original))
 }
 
@@ -122,9 +262,19 @@ pub fn paste_and_restore(
     thread::sleep(Duration::from_millis(50));
 
     let modifier = copy_paste_mod();
+    let paste_key = shortcut_letter_key('v');
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(modifier, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
+    // Same settle delay as the copy sequence in `capture_selection`, and for
+    // the same reason: without it, the paste-key press can land before the
+    // OS/target app has registered the modifier as held, so it's seen as an
+    // unmodified keystroke — the target app types a literal "v"/"c" instead
+    // of running the paste shortcut, silently discarding the rewritten text
+    // that's already sitting in the clipboard right next to it.
+    thread::sleep(Duration::from_millis(40));
+    enigo.key(paste_key, Direction::Press)?;
+    thread::sleep(Duration::from_millis(20));
+    enigo.key(paste_key, Direction::Release)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
     crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));
@@ -163,9 +313,19 @@ pub fn paste_html_and_restore(
     thread::sleep(Duration::from_millis(50));
 
     let modifier = copy_paste_mod();
+    let paste_key = shortcut_letter_key('v');
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.key(modifier, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
+    // Same settle delay as the copy sequence in `capture_selection`, and for
+    // the same reason: without it, the paste-key press can land before the
+    // OS/target app has registered the modifier as held, so it's seen as an
+    // unmodified keystroke — the target app types a literal "v"/"c" instead
+    // of running the paste shortcut, silently discarding the rewritten text
+    // that's already sitting in the clipboard right next to it.
+    thread::sleep(Duration::from_millis(40));
+    enigo.key(paste_key, Direction::Press)?;
+    thread::sleep(Duration::from_millis(20));
+    enigo.key(paste_key, Direction::Release)?;
     enigo.key(modifier, Direction::Release)?;
     drop(enigo);
     crate::trace(&format!("paste#{trace_id}: synthetic Ctrl+V sent"));

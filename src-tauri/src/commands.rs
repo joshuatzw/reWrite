@@ -62,6 +62,11 @@ pub fn get_captured_text(state: State<AppState>) -> Option<String> {
 }
 
 #[tauri::command]
+pub fn get_capture_error(state: State<AppState>) -> Option<String> {
+    state.capture_error.lock().unwrap().clone()
+}
+
+#[tauri::command]
 pub async fn paste_text(
     result: String,
     trace_id: Option<u64>,
@@ -110,7 +115,7 @@ pub async fn paste_text(
             "paste#{trace_id}: closing bubble_menu and restoring source focus"
         ));
         crate::hide_bubble_menu(window.app_handle());
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             crate::selection_watcher::focus_last_source_window();
         }
@@ -119,10 +124,7 @@ pub async fn paste_text(
             "paste#{trace_id}: hiding caller window and restoring paste target"
         ));
         window.hide().map_err(|e| e.to_string())?;
-        #[cfg(target_os = "windows")]
-        {
-            crate::focus_paste_target_window();
-        }
+        crate::focus_paste_target_window(window.app_handle());
     }
     crate::trace(&format!(
         "paste#{trace_id}: sleeping before Ctrl+V for {paste_delay_ms}ms"
@@ -230,13 +232,13 @@ pub fn save_config(
         let prev = lock(&state.config)?;
         prev.bubble_enabled != config.bubble_enabled
     };
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let bubble_enabled = config.bubble_enabled;
 
     crate::config::save(&config, &path).map_err(|e| e.to_string())?;
     *lock(&state.config)? = config;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     if bubble_enabled_changed {
         if bubble_enabled {
             crate::selection_watcher::start(&app);
@@ -244,7 +246,7 @@ pub fn save_config(
             crate::selection_watcher::stop();
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = bubble_enabled_changed;
 
     Ok(())
@@ -264,7 +266,7 @@ pub fn close_overlay(app: AppHandle) {
         if let Some(overlay) = handle.get_webview_window("overlay") {
             let _ = overlay.hide();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         crate::esc_hook::stop();
     });
 }
@@ -279,7 +281,7 @@ pub fn close_overlay(app: AppHandle) {
 // the whole bubble. Reading the anchor straight from `selection_watcher`'s own
 // last-known state (the same Rust-side data the event was built from)
 // sidesteps that race entirely.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tauri::command]
 pub fn bubble_clicked(state: State<AppState>, app: AppHandle) -> Result<(), String> {
     let anchor = crate::selection_watcher::last_anchor()
@@ -303,10 +305,10 @@ pub fn bubble_clicked(state: State<AppState>, app: AppHandle) -> Result<(), Stri
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[tauri::command]
 pub fn bubble_clicked(_state: State<AppState>, _app: AppHandle) -> Result<(), String> {
-    Err("Selection bubble is only supported on Windows.".to_string())
+    Err("Selection bubble is only supported on Windows and macOS.".to_string())
 }
 
 #[tauri::command]
@@ -344,6 +346,93 @@ pub fn open_settings(app: AppHandle) {
         // window registers its listener at startup, so the event is live.
         let _ = handle.emit("settings:navigate", "settings");
     });
+}
+
+// ── Accessibility commands (macOS Phase 2 onboarding, see roadmap-mac.md) ─────
+
+#[cfg(target_os = "macos")]
+fn sync_selection_watcher_with_accessibility(app: &AppHandle, state: &AppState, granted: bool) {
+    if granted {
+        let bubble_enabled = state
+            .config
+            .lock()
+            .map(|config| config.bubble_enabled)
+            .unwrap_or(false);
+        if bubble_enabled {
+            crate::trace(
+                "sync_selection_watcher_with_accessibility: permission granted, ensuring watcher",
+            );
+            crate::selection_watcher::start(app);
+        }
+    } else {
+        crate::trace(
+            "sync_selection_watcher_with_accessibility: permission missing, stopping watcher",
+        );
+        crate::selection_watcher::stop();
+    }
+}
+
+/// Non-prompting query, safe to poll repeatedly (e.g. `AccessibilityView.tsx`'s
+/// live status indicator). Never triggers the native permission dialog.
+#[tauri::command]
+pub fn check_accessibility_permission(app: AppHandle, state: State<AppState>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let granted = crate::clipboard::accessibility_trusted(false);
+        sync_selection_watcher_with_accessibility(&app, &state, granted);
+        granted
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, state);
+        // Accessibility isn't a concept on other platforms — never block on it.
+        true
+    }
+}
+
+/// Triggers the native "reWrite would like to control this computer" system
+/// prompt the first time it's called. macOS will not re-prompt if the user
+/// already dismissed it once — that's expected OS behavior, not a bug; the
+/// user has to grant it from System Settings after that (see
+/// `open_accessibility_settings`).
+#[tauri::command]
+pub fn request_accessibility_permission(app: AppHandle, state: State<AppState>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let granted = crate::clipboard::accessibility_trusted(true);
+        sync_selection_watcher_with_accessibility(&app, &state, granted);
+        granted
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, state);
+        true
+    }
+}
+
+/// Opens System Settings straight to Privacy & Security → Accessibility,
+/// same external-URL pattern as `open_checkout`/`open_billing_portal`.
+#[tauri::command]
+pub async fn open_accessibility_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_opener::OpenerExt;
+
+        // Best-known deep link for the Accessibility pane as of recent macOS
+        // versions (Ventura/Sonoma/Sequoia). Unverified on a real device from
+        // this environment — see project.md Known Gaps.
+        app.opener()
+            .open_url(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                None::<&str>,
+            )
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 #[tauri::command]
