@@ -6,7 +6,7 @@ import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
 import { BUILTIN_SKILLS } from "../skills";
-import logoBlack from "../assets/rewrite_new_icon.png";
+import logoBlack from "../assets/rewrite_logo_black.png";
 import type { ActiveView, AuthState } from "./settingsTypes";
 import { ACCENT, BUILTIN_SKILL_OPTIONS, FREE_TIER_MONTHLY_LIMIT } from "./settingsConstants";
 import { IconLock, Sidebar, Toggle } from "./settingsComponents";

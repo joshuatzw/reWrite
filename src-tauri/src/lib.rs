@@ -1887,7 +1887,7 @@ pub fn run() {
             };
 
             TrayIconBuilder::new()
-                .icon(tauri::include_image!("icons/rewrite_new_icon_white.png"))
+                .icon(tauri::include_image!("icons/rewrite_logo_taskbar.png"))
                 .menu(&menu)
                 .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {

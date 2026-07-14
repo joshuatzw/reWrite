@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import logoBlack from "../assets/rewrite_new_icon.png";
+import logoBlack from "../assets/rewrite_logo_black.png";
 import { ACCENT, APP_VERSION } from "./settingsConstants";
 import { initialsFromEmail } from "./settingsHelpers";
 import type { ActiveView, AuthState } from "./settingsTypes";
