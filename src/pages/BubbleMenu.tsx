@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import type { SkillsConfig } from "../types";
 import { buildItems, type SkillItem } from "../skills";
-import logoBlack from "../assets/rewrite_logo_black.png";
+import logoBlack from "../assets/logo_transparent.png";
 
 type Status = "idle" | "loading" | "error";
 

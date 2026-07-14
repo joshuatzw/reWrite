@@ -235,6 +235,15 @@ Here is
 
 **BUGS:**
 [ ] Change the supabase Auth sign in link - laymen won't know.
+[ ] Verify bubble-menu HiDPI clamp on real hardware (Windows @ 125/150/200% scale).
+    `show_bubble_menu` now clamps via `clamp_to_monitor(&w, ...)`, which reads
+    `outer_size()` right after `set_size(...)`. This assumes `set_size` is
+    applied synchronously before the size is read back — true on the main
+    thread today (SetWindowPos / setFrame are synchronous), but the menu can be
+    resized to 44x44 during the loading spinner, so a stale read would size the
+    clamp wrong near a screen edge. Confirm the menu never hangs off the
+    right/bottom edge on a scaled multi-monitor setup. (See lib.rs
+    show_bubble_menu + bubble-menu-bug-diagnosis.md.)
 
 **Security and Abuse**
 

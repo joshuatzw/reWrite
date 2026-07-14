@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import logoBlack from "../assets/rewrite_logo_black.png";
+import logoBlack from "../assets/logo_transparent.png";
 
 // Tiny clickable dot filling the bubble window. Rust already positions the
 // window at the selection anchor on every `selection:detected` event (see

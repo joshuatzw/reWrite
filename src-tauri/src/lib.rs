@@ -729,24 +729,45 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
         // destroy it as an "outside" click before the user ever sees it.
         suppress_bubble_menu_outside_click();
 
-        let (x, y) = clamp_rect_to_monitor(x + 8.0, y + 8.0, BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT);
-
         if let Some(w) = handle.get_webview_window("bubble_menu") {
             let _ = w.set_size(LogicalSize::new(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT));
+            // Clamp using the window's own `outer_size()` (via
+            // `clamp_to_monitor`) rather than the logical BUBBLE_MENU_WIDTH/
+            // HEIGHT constants directly. On Windows, `clamp_rect_to_monitor`
+            // subtracts w/h from `rcWork`, which `GetMonitorInfoW` reports in
+            // *physical* pixels — feeding it the logical constants there
+            // under-subtracts by the monitor's scale factor on any HiDPI
+            // display, letting the menu hang off the right/bottom edge.
+            // `clamp_to_monitor` reads `outer_size()`, which is already in
+            // physical pixels on Windows (no conversion needed) and is
+            // converted to points on macOS (matching `CGDisplayBounds` and
+            // the incoming points-space `x, y`) — see its doc comment. The
+            // `set_size` call above runs first so `outer_size()` reflects the
+            // menu's real dimensions before the clamp reads it.
+            let (x, y) = clamp_to_monitor(&w, x + 8.0, y + 8.0);
             // Same points-vs-physical-pixels distinction as `show_bubble` —
             // see that call site's comment.
             #[cfg(target_os = "macos")]
             let _ = w.set_position(LogicalPosition::new(x, y));
             #[cfg(not(target_os = "macos"))]
             let _ = w.set_position(PhysicalPosition::new(x, y));
+            // Reload the webview *now that it is back on-screen*, not at close
+            // time. `hide_bubble_menu` parks this window at (-32000, -32000);
+            // reloading it there (as it used to) runs the fresh page load under
+            // WebView2's off-screen occlusion throttling, so the new tree often
+            // never paints — the window then reveals a blank surface on the next
+            // open (see bubble-menu-bug-diagnosis.md, "cross-cutting lesson").
+            // Doing the reload here, while the window is on a real monitor,
+            // forces a fresh React tree that actually renders, and makes any
+            // stale error/loading state from the previous use impossible.
+            let reload_result = w.reload();
             let _ = w.set_always_on_top(false);
             let _ = w.set_always_on_top(true);
             let show_result = w.show();
             let focus_result = w.set_focus();
-            let emit_result = w.emit("bubble-menu:show", ());
             trace(&format!(
-                "show_bubble_menu: shown at ({x}, {y}) emit={:?} show={:?} focus={:?}",
-                emit_result.is_ok(),
+                "show_bubble_menu: shown at ({x}, {y}) reload={:?} show={:?} focus={:?}",
+                reload_result.is_ok(),
                 show_result.is_ok(),
                 focus_result.is_ok(),
             ));
@@ -767,15 +788,19 @@ fn hide_bubble_menu_inner(app: &AppHandle, suppress_probe: bool) {
             suppress_bubble_menu_probe();
         }
         if let Some(w) = handle.get_webview_window("bubble_menu") {
+            // Reset is emitted while the window is still on-screen (its JS is
+            // reliably live at this instant), then it is parked off-screen. The
+            // fresh-page reload deliberately does NOT happen here: reloading a
+            // parked/off-screen window runs under WebView2 occlusion throttling
+            // and often fails to paint. `show_bubble_menu` reloads instead, once
+            // the window is back on a real monitor. See bubble-menu-bug-diagnosis.md.
             let _ = w.emit("bubble-menu:reset", ());
             let _ = w.set_position(PhysicalPosition::new(
                 BUBBLE_MENU_PARKED_X,
                 BUBBLE_MENU_PARKED_Y,
             ));
-            let reload_result = w.reload();
             trace(&format!(
-                "hide_bubble_menu: reset emitted, parked window, reload={:?}, suppress_probe={suppress_probe}",
-                reload_result.is_ok()
+                "hide_bubble_menu: reset emitted, parked window, suppress_probe={suppress_probe}"
             ));
         }
     });

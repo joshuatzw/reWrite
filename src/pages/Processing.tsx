@@ -6,7 +6,7 @@ import {
   LogicalPosition,
   LogicalSize,
 } from "@tauri-apps/api/window";
-import logoWhite from "../assets/rewrite_logo_white.png";
+import logoBlack from "../assets/rewrite_logo_black_transparent.png";
 
 type Variant = "normal" | "limit";
 
@@ -108,16 +108,16 @@ export default function Processing() {
             {LIMIT_TEXT}
           </div>
         ) : (
-          // Opaque circle with logo and a faint grey/white glow. Same
-          // reasoning as above: background follows the accent token, glow
-          // shadow stays literal (floating badge, contrast-against-anything
-          // by design).
+          // Opaque white circle carrying the black logo, with a faint
+          // grey/white glow. Background is literal white so the black-ink
+          // mark reads clearly; glow shadow stays literal too (floating
+          // badge, contrast-against-anything by design).
           <div
             style={{
               width: 77,
               height: 77,
               borderRadius: "50%",
-              background: "var(--rw-accent)",
+              background: "#ffffff",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -127,7 +127,7 @@ export default function Processing() {
             }}
           >
             <img
-              src={logoWhite}
+              src={logoBlack}
               alt="reWrite"
               style={{ height: 25, width: "auto", userSelect: "none" }}
             />
