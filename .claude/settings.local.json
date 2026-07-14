@@ -4,7 +4,15 @@
       "PowerShell(rustc --version)",
       "PowerShell(cargo --version)",
       "PowerShell(node --version)",
-      "PowerShell(npm --version)"
+      "PowerShell(npm --version)",
+      "Bash(cargo update *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(sudo chown annpng:staff ~/.config)",
+      "Read(//Users/annpng/.config/**)",
+      "Bash(gh auth *)",
+      "Bash(git config *)"
     ]
   }
 }

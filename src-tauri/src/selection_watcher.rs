@@ -630,6 +630,8 @@ mod mac {
     const AX_SELECTED_TEXT_RANGE: &str = "AXSelectedTextRange";
     const AX_BOUNDS_FOR_RANGE: &str = "AXBoundsForRange";
     const AX_VALUE: &str = "AXValue";
+    /// See `maybe_activate_manual_accessibility` for why this is needed.
+    const AX_MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
 
     type AXError = i32;
     type AXValueType = u32;
@@ -778,12 +780,19 @@ mod mac {
             the_type: AXValueType,
             value_ptr: *mut c_void,
         ) -> Boolean;
+        fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
+        fn AXUIElementSetAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> AXError;
 
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         static kCFRunLoopDefaultMode: CFStringRef;
+        static kCFBooleanTrue: CFTypeRef;
         fn CFStringCreateWithCString(
             alloc: CFAllocatorRef,
             c_str: *const c_char,
@@ -993,6 +1002,7 @@ mod mac {
             // loop, some newer generation owns it and we must stop too.
             loop {
                 let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+                check_frontmost_app_switch();
                 if STOP_REQUESTED.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1209,6 +1219,72 @@ mod mac {
         }
     }
 
+    /// Dedicated frontmost-application-change check, polled once per
+    /// `run_tap_thread` iteration (every ~0.25s — see the loop above). This
+    /// exists because switching *which app is frontmost* — Cmd+Tab, a Dock
+    /// click, a trackpad swipe, Mission Control — does not reliably generate
+    /// any CGEvent in this tap's mouse/keyboard mask (unlike, say, clicking
+    /// into an already-frontmost other app, which the existing mouse-up
+    /// probe in `tap_callback` already handles). Without this, the bubble
+    /// stays stuck on screen, anchored to a selection in an app that's no
+    /// longer frontmost, until the user happens to click or type again.
+    /// Cheap no-op when there's no bubble tracked.
+    fn check_frontmost_app_switch() {
+        if !HAD_SELECTION.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(app) = APP.get() else {
+            return;
+        };
+        // Fire-and-forget: unlike `foreground::detect_impl`'s synchronous
+        // main-thread round trip (fine there — it's a one-shot call kicked
+        // off by a hotkey), this runs every ~0.25s on the same thread that
+        // owns the CGEventTap's run loop, so it must never block waiting on
+        // a reply. The closure does its own comparison and sends
+        // `WorkerMsg::Clear` itself instead of reporting back.
+        let _ = app.run_on_main_thread(|| {
+            use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+            let frontmost_pid = unsafe {
+                NSWorkspace::sharedWorkspace()
+                    .frontmostApplication()
+                    .map(|running_app| running_app.processIdentifier())
+            };
+            let own_pid = unsafe { NSRunningApplication::currentApplication().processIdentifier() };
+            // The source app (the one that owned the selection when it was
+            // detected — see `remember_source_pid`/`crate::paste_target_pid`)
+            // is deliberately still frontmost for the whole time the bubble
+            // is visible: `show_bubble`/`show_bubble_menu` build those
+            // windows with `.focused(false)` and never call `.set_focus()`,
+            // specifically so showing the bubble doesn't steal foreground
+            // from the source app. So the source app being frontmost is the
+            // normal steady state, not a switch — only clear when frontmost
+            // is neither reWrite itself (legitimate: user clicked the
+            // bubble/menu) nor the source app.
+            let source_pid = crate::paste_target_pid();
+            if should_clear_for_frontmost_switch(own_pid, source_pid, frontmost_pid) {
+                if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref().cloned() {
+                    let _ = tx.send(WorkerMsg::Clear);
+                }
+            }
+        });
+    }
+
+    /// Pure decision logic behind `check_frontmost_app_switch`, split out so
+    /// it's directly unit-testable without any AppKit FFI — see `mod tests`
+    /// below. `None` (no frontmost app reported) is treated as "don't clear"
+    /// rather than "clear": a transient `NSWorkspace` lookup failure/gap
+    /// shouldn't hide a bubble that may still be pointing at the right app.
+    fn should_clear_for_frontmost_switch(
+        own_pid: i32,
+        source_pid: i32,
+        frontmost_pid: Option<i32>,
+    ) -> bool {
+        match frontmost_pid {
+            Some(pid) => pid != own_pid && pid != source_pid,
+            None => false,
+        }
+    }
+
     fn bubble_menu_is_open() -> bool {
         crate::bubble_menu_probe_suppressed()
             || APP
@@ -1245,6 +1321,9 @@ mod mac {
         CFRelease(attr as CFTypeRef);
         if err == AX_ERROR_SUCCESS && !focused.is_null() {
             let result = selection_from_element(focused as AXUIElementRef);
+            if !matches!(result, Ok(Some(_))) {
+                maybe_activate_manual_accessibility(focused as AXUIElementRef);
+            }
             CFRelease(focused);
             match result {
                 Ok(Some(selection)) => {
@@ -1270,6 +1349,9 @@ mod mac {
             let err = AXUIElementCopyElementAtPosition(system, x, y, &mut at_point);
             if err == AX_ERROR_SUCCESS && !at_point.is_null() {
                 let r = selection_from_element(at_point);
+                if !matches!(r, Ok(Some(_))) {
+                    maybe_activate_manual_accessibility(at_point);
+                }
                 CFRelease(at_point);
                 r
             } else {
@@ -1300,6 +1382,76 @@ mod mac {
         let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
         CFRelease(attr as CFTypeRef);
         err == AX_ERROR_SUCCESS && settable != 0
+    }
+
+    /// PIDs already sent the `AXManualAccessibility` activation below. Never
+    /// evicted: once a process has been asked, asking again is a harmless
+    /// no-op, so there's no need to clean this up e.g. when a browser quits —
+    /// a reused pid from a long-exited process just gets one redundant,
+    /// harmless attempt.
+    static AX_ACTIVATED_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    /// Chromium-based apps (Chrome, Edge, Brave, Arc, Vivaldi, and Electron
+    /// apps like VS Code/Notion) only populate the full accessibility tree
+    /// that `AXSelectedText`/`AXSelectedTextRange`/`AXBoundsForRange` read
+    /// from once they detect an actively-watching assistive-technology
+    /// client — normally VoiceOver. This module's passive, read-only AX
+    /// polling never triggers that, so on a fresh browser process every
+    /// selection read finds a real focused/hit-tested element but no
+    /// selection attributes on it, forever. Confirmed by live testing
+    /// 2026-07-12: Notes detected selections correctly on the first try;
+    /// Chrome and Notion (Electron) returned no selection on every attempt
+    /// across a multi-minute session, with `probe_selection`'s two lookups
+    /// both finding *an* element, just never one with selection data.
+    ///
+    /// The fix is Chromium's own documented escape hatch: setting
+    /// `AXManualAccessibility` to `true` forces full accessibility mode on
+    /// for that process, the same as if VoiceOver had started watching it.
+    /// **Where to set it matters and was wrong in the first attempt at this
+    /// fix**: setting it on the app-level `AXUIElementCreateApplication(pid)`
+    /// object returned `kAXErrorAttributeUnsupported` (-25205) from real
+    /// Chrome in live testing — Chrome's generic top-level Application
+    /// accessibility object doesn't implement this Chromium-specific
+    /// attribute at all. It has to be set on an element that actually lives
+    /// inside Chrome's own accessibility bridge — i.e. the exact
+    /// focused/hit-tested `AXUIElementRef` this function already has in hand
+    /// from `probe_selection`, before it's released. Native, non-Chromium
+    /// apps don't recognize this attribute on their elements either, and
+    /// `AXUIElementSetAttributeValue` just returns an error there too
+    /// (discarded) — so this is safe to attempt unconditionally on any
+    /// element this module ever failed to read a selection from; no
+    /// bundle-id/browser allowlist is needed.
+    ///
+    /// One real limitation even once this targets the right element:
+    /// activating the tree doesn't make it exist instantly. The very first
+    /// selection in a given browser process right after this fires may still
+    /// not produce a bubble; the tree populates in the background, and the
+    /// *next* selection in that same process should work, since the
+    /// activation (and the tree) persists for the process's lifetime — this
+    /// function only ever asks once per pid, on the first selection attempt
+    /// that comes up empty for it.
+    unsafe fn maybe_activate_manual_accessibility(element: AXUIElementRef) {
+        let mut pid: i32 = 0;
+        if AXUIElementGetPid(element, &mut pid) != AX_ERROR_SUCCESS || pid == 0 {
+            return;
+        }
+        {
+            let mut activated = AX_ACTIVATED_PIDS.lock().unwrap();
+            if activated.contains(&pid) {
+                return;
+            }
+            activated.push(pid);
+        }
+
+        let attr = match cfstring(AX_MANUAL_ACCESSIBILITY) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let err = AXUIElementSetAttributeValue(element, attr, kCFBooleanTrue);
+        CFRelease(attr as CFTypeRef);
+        crate::trace(&format!(
+            "selection_watcher::maybe_activate_manual_accessibility(mac): pid={pid} set AXManualAccessibility on found element -> err={err}"
+        ));
     }
 
     unsafe fn selection_from_element(
@@ -1440,6 +1592,30 @@ mod mac {
                 size: CGSize::default(),
             };
             assert_eq!(selection_anchor_from_rect(rect), (10.0, 20.0));
+        }
+
+        #[test]
+        fn frontmost_switch_clears_when_pid_differs_from_own_and_source() {
+            assert!(should_clear_for_frontmost_switch(100, 300, Some(200)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_for_own_pid() {
+            assert!(!should_clear_for_frontmost_switch(100, 300, Some(100)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_for_source_pid() {
+            // The steady state for the whole time the bubble is visible:
+            // show_bubble/show_bubble_menu deliberately don't steal
+            // foreground, so the source app (Safari, say) stays frontmost.
+            // This must NOT clear the bubble.
+            assert!(!should_clear_for_frontmost_switch(100, 300, Some(300)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_when_unknown() {
+            assert!(!should_clear_for_frontmost_switch(100, 300, None));
         }
     }
 }

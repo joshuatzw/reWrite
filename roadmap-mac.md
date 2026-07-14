@@ -161,6 +161,32 @@ This is the Mac version of the passive selection bubble: when the user highlight
   `is_selection_significant`). Still requires real-device verification — see
   `project.md`.
 
+
+  ##Phase 4B:
+  1. macOS: The bubble menu has excess space below the available options, sizing should be dynamic depending on the number of skills. Maximum of 4 skills in container no wrap text, scrollable
+2. Version number inconsistency
+    1. Sidebar says v1.0.6, but in settings it is v1.0.7
+3. Skill needs to be saved on the cloud so it can be update between devices
+    1. 
+4. Accessibility Menu 
+- This menu is appearing on windows as well —> This should only appear if user opens it on a mac.
+- "Granted! reWrite is ready to go.” is green by default —> this needs to be truly dependent on whether the system has granted rights to it.
+
+## Phase 4C — Fix: bubble never appears in Chrome (and other Chromium-based apps)
+
+Real symptom report 2026-07-12: "rewrite bubble is not coming up on Chrome browser." Investigated live against a `npm run tauri dev` build with trace logging, not just by reading code.
+
+- [x] Reproduce and isolate the failure via trace logs.
+  - Control test in Notes: `probe_selection` returned `Some(...)` on the first try, `selection:detected` fired, the bubble showed, clicking it opened the bubble menu, and `selection:cleared` fired correctly on deselect — confirms the detection → event → frontend-render pipeline itself is fine.
+  - Test in Chrome: `probe_selection -> None` on every attempt across a multi-minute session, so `selection:detected` never fires and no bubble ever shows.
+  - Test in Notion (Electron/Chromium-based desktop app): same `None`-on-every-attempt symptom as Chrome.
+- [x] Identify root cause: Chromium-based renderers (Chrome, and Electron apps like Notion, which embed Chromium) only populate the accessibility tree that `AXSelectedText`/`AXSelectedTextRange`/`AXBoundsForRange` read from once they detect an actively-watching assistive-technology client (normally VoiceOver). This module's passive, read-only AX polling never triggers that activation, so both `probe_selection` code paths (focused element, and the Phase 4 Electron hit-test fallback) find a real AX element at the cursor/focus but it never carries selection data — indefinitely, not intermittently.
+- [x] Implement fix in `selection_watcher.rs` (mac backend only): when both selection lookups in `probe_selection` come back empty but did find a real element, read that element's pid (`AXUIElementGetPid`) and call `maybe_activate_manual_accessibility(pid)`, which sets Chromium's documented `AXManualAccessibility` attribute to `true` on the app's own `AXUIElementRef` (`AXUIElementCreateApplication(pid)`, not the system-wide element used elsewhere in this file). This forces the target process into full accessibility mode, the same state VoiceOver would put it in. Attempted once per pid (`AX_ACTIVATED_PIDS`, never evicted — re-asking a reused pid is a harmless no-op); non-Chromium apps simply return `kAXErrorAttributeUnsupported` for the attribute set, which is discarded, so no bundle-id/browser allowlist is needed — the same code path runs for every app.
+- [x] `cargo check --lib --bins`, `cargo test --lib --bins` (23 tests, unchanged) pass.
+- [ ] **Real-device re-verification of the fix is still needed** — see caveat below before checking this box.
+
+  **Known limitation of the fix, by design:** activating the tree doesn't populate it instantly. The very first selection in a given Chrome/Notion window right after this fires may still show no bubble; the *next* selection in that same process should work, since the activation (and the tree) persists for the process's whole lifetime — `maybe_activate_manual_accessibility` only ever asks once per pid. A human should: launch/rebuild the app, highlight text in Chrome (first attempt may still miss — check the trace log for `maybe_activate_manual_accessibility(mac): pid=<chrome_pid> ... err=0`, meaning the attribute was accepted), then highlight a second time in the same Chrome window and confirm the bubble now appears. Repeat for Notion. `err=0` means Chromium accepted the attribute; a non-zero `err` there (as opposed to the expected `-25205`/attribute-unsupported seen on plain native apps) would mean the activation itself is failing and needs further investigation. Telegram's macOS client is not Chromium-based, so if it was also failing before this fix, that is a separate, still-open issue — re-test it independently once Chrome/Notion are confirmed fixed.
+
 ## Phase 5 — Mac polish and reliability
 
 - [ ] Add compatibility tracing for failed capture, paste, and bubble detection cases.
