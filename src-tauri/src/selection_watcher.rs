@@ -630,6 +630,8 @@ mod mac {
     const AX_SELECTED_TEXT_RANGE: &str = "AXSelectedTextRange";
     const AX_BOUNDS_FOR_RANGE: &str = "AXBoundsForRange";
     const AX_VALUE: &str = "AXValue";
+    /// See `is_element_editable`'s role-based branch for why this is read.
+    const AX_ROLE: &str = "AXRole";
     /// See `maybe_activate_manual_accessibility` for why this is needed.
     const AX_MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
 
@@ -1364,24 +1366,66 @@ mod mac {
         result
     }
 
+    /// Whether `role` (an `AXRole` string) names a control that's always a
+    /// text-editable field. Pure/no-FFI so it's directly unit-testable — see
+    /// `mod tests` below. This is a narrow allowlist, not a guess: these are
+    /// the roles Chromium/WebKit use for `<input>` (`AXTextField`),
+    /// `<textarea>`/contenteditable (`AXTextArea`), `<input type=search>`
+    /// (`AXSearchField`), and autocomplete/address-bar-style combo inputs
+    /// (`AXComboBox`). Deliberately excludes roles like `AXStaticText` and
+    /// `AXWebArea`/`AXGroup` that cover read-only article/page content —
+    /// widening this list is how the read-only exclusion would quietly break,
+    /// so any addition needs the same "is this always user-editable text" bar.
+    fn is_editable_role(role: &str) -> bool {
+        matches!(
+            role,
+            "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
+        )
+    }
+
     /// Whether `element` is an editable text control, mirroring the Windows
     /// backend's `is_element_editable` (see that function's doc comment for
     /// why this gate exists — it's what confines the rewrite bubble to text
     /// fields instead of any selectable text, e.g. a Safari article). AX has
     /// no single "read-only" flag equivalent to UIA's `ValuePattern`, but
     /// `AXUIElementIsAttributeSettable` on `AXValue` is the direct analog:
-    /// true only for controls whose value/text can actually be edited. Fails
-    /// closed (not editable) on any AX error, same rationale as the Windows
-    /// side — read-only content must never win a probe error's benefit of
-    /// the doubt.
+    /// true only for controls whose value/text can actually be edited.
+    ///
+    /// That settable check alone isn't enough, though: Chromium/WebKit browser
+    /// editable fields (Gmail compose, search boxes, plain `<textarea>`/
+    /// `<input>`) frequently report `AXValue` as NOT settable even while
+    /// genuinely editable, because their AX tree is populated lazily and the
+    /// settable bit lags behind. So this also accepts the element via its
+    /// `AXRole` — see `is_editable_role` — as a second, independent path to
+    /// "editable". If the role can't be read, it falls back to the settable
+    /// check alone. Fails closed (not editable) on any AX error, same rationale
+    /// as the Windows side — read-only content must never win a probe error's
+    /// benefit of the doubt.
     unsafe fn is_element_editable(element: AXUIElementRef) -> bool {
-        let Ok(attr) = cfstring(AX_VALUE) else {
+        if let Ok(attr) = cfstring(AX_VALUE) {
+            let mut settable: Boolean = 0;
+            let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
+            CFRelease(attr as CFTypeRef);
+            if err == AX_ERROR_SUCCESS && settable != 0 {
+                return true;
+            }
+        }
+
+        let Ok(role_attr) = cfstring(AX_ROLE) else {
             return false;
         };
-        let mut settable: Boolean = 0;
-        let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
-        CFRelease(attr as CFTypeRef);
-        err == AX_ERROR_SUCCESS && settable != 0
+        let mut role_value: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, role_attr, &mut role_value);
+        CFRelease(role_attr as CFTypeRef);
+        if err != AX_ERROR_SUCCESS || role_value.is_null() {
+            return false;
+        }
+        let role = cfstring_to_string(role_value as CFStringRef);
+        CFRelease(role_value);
+        match role {
+            Ok(role) => is_editable_role(&role),
+            Err(_) => false,
+        }
     }
 
     /// PIDs already sent the `AXManualAccessibility` activation below. Never
@@ -1616,6 +1660,22 @@ mod mac {
         #[test]
         fn frontmost_switch_does_not_clear_when_unknown() {
             assert!(!should_clear_for_frontmost_switch(100, 300, None));
+        }
+
+        #[test]
+        fn editable_role_accepts_known_editable_browser_roles() {
+            assert!(is_editable_role("AXTextField"));
+            assert!(is_editable_role("AXTextArea"));
+            assert!(is_editable_role("AXComboBox"));
+            assert!(is_editable_role("AXSearchField"));
+        }
+
+        #[test]
+        fn editable_role_rejects_read_only_and_empty_roles() {
+            assert!(!is_editable_role(""));
+            assert!(!is_editable_role("AXStaticText"));
+            assert!(!is_editable_role("AXWebArea"));
+            assert!(!is_editable_role("AXGroup"));
         }
     }
 }
