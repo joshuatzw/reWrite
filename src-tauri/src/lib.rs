@@ -919,6 +919,20 @@ pub async fn ensure_valid_token(app: &AppHandle) -> Option<String> {
     }
 }
 
+/// Persists a freshly-synced subscription cache to disk, best-effort, so a
+/// crash or relaunch before the *next* sync still shows the last-known-good
+/// plan instead of quietly reverting to Free. Mirrors the auth.json write
+/// path used for `AuthSession` elsewhere in this file.
+pub(crate) fn persist_subscription(app: &AppHandle, sub: &auth::SubscriptionCache) {
+    if let Ok(path) = app
+        .path()
+        .app_config_dir()
+        .map(|d| d.join("subscription.json"))
+    {
+        let _ = auth::save_subscription(sub, &path);
+    }
+}
+
 pub fn show_settings(app: &AppHandle) {
     // The Settings window is pre-warmed (hidden) at startup, so opening it is
     // just a show + focus — we never build a webview at runtime here. Building
@@ -969,6 +983,7 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
             };
 
             if let Ok(sub) = auth::sync_subscription(&state.http_client, &access_token).await {
+                persist_subscription(&app, &sub);
                 *state.subscription.lock().unwrap() = sub;
             }
 
@@ -1003,6 +1018,7 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
             };
 
             if let Ok(sub) = auth::sync_subscription(&state.http_client, &access_token).await {
+                persist_subscription(&app, &sub);
                 *state.subscription.lock().unwrap() = sub;
             }
 
@@ -1044,6 +1060,7 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
         *state.auth_session.lock().unwrap() = Some(session.clone());
 
         if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
+            persist_subscription(&app, &sub);
             *state.subscription.lock().unwrap() = sub;
         }
 
@@ -1434,6 +1451,15 @@ pub fn run() {
             let loaded_history = history::load(&history_path);
             *app.state::<AppState>().history.lock().unwrap() = loaded_history;
 
+            // ── Subscription: seed last-known-good cache before any sync ──────
+            // A slow/failed network sync must not silently present a paying
+            // user as "Free" — load whatever the last successful sync wrote
+            // before the (async, possibly failing) network sync even starts.
+            let subscription_path = app.path().app_config_dir()?.join("subscription.json");
+            if let Some(sub) = auth::load_subscription(&subscription_path) {
+                *app.state::<AppState>().subscription.lock().unwrap() = sub;
+            }
+
             // ── Auth: load session, refresh + sync in background ──────────────
             let auth_path = app.path().app_config_dir()?.join("auth.json");
             let maybe_session = auth::load_session(&auth_path);
@@ -1472,7 +1498,13 @@ pub fn run() {
                     };
 
                     if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
+                        persist_subscription(&app_handle, &sub);
                         *state.subscription.lock().unwrap() = sub;
+                        // The frontend's initial read (on mount) can easily
+                        // race this background sync; nudge it to re-read so a
+                        // slow startup sync doesn't leave the UI stuck on
+                        // whatever was cached (or default) at first paint.
+                        let _ = app_handle.emit("subscription:updated", ());
                     }
                 });
             }
@@ -1496,7 +1528,9 @@ pub fn run() {
                             if let Ok(sub) =
                                 auth::sync_subscription(&state.http_client, &token).await
                             {
+                                persist_subscription(&app_handle, &sub);
                                 *state.subscription.lock().unwrap() = sub;
+                                let _ = app_handle.emit("subscription:updated", ());
                             }
                         }
                     }

@@ -14,7 +14,7 @@ pub struct AuthSession {
     pub email: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubscriptionCache {
     pub is_subscribed: bool,
     pub subscription_valid_until: Option<String>,
@@ -52,6 +52,40 @@ pub fn save_session(session: &AuthSession, path: &Path) -> Result<()> {
 }
 
 pub fn clear_session(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+// Last-known-good subscription state, persisted so a slow/failed sync on the
+// next launch doesn't silently present a paying user as "Free" (see
+// `sync_subscription` below, which is the only writer of a fresh value).
+pub fn load_subscription(path: &Path) -> Option<SubscriptionCache> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // Preferred path: DPAPI-encrypted JSON.
+    if let Some(plain) = crate::secure_store::decrypt(&bytes) {
+        if let Ok(sub) = serde_json::from_slice::<SubscriptionCache>(&plain) {
+            return Some(sub);
+        }
+    }
+
+    // Legacy fallback: raw plaintext JSON written before at-rest encryption.
+    serde_json::from_slice::<SubscriptionCache>(&bytes).ok()
+}
+
+pub fn save_subscription(sub: &SubscriptionCache, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec_pretty(sub)?;
+    let cipher = crate::secure_store::encrypt(&json)?;
+    std::fs::write(path, cipher)?;
+    Ok(())
+}
+
+pub fn clear_subscription(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 

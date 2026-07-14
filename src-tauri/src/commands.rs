@@ -667,6 +667,9 @@ pub async fn logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), St
     if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
         crate::auth::clear_session(&path);
     }
+    if let Ok(path) = app.path().app_config_dir().map(|d| d.join("subscription.json")) {
+        crate::auth::clear_subscription(&path);
+    }
     *state.auth_session.lock().unwrap() = None;
     *state.subscription.lock().unwrap() = crate::auth::SubscriptionCache::default();
     Ok(())
@@ -723,6 +726,7 @@ pub async fn refresh_subscription(
         .await
         .map_err(|e| e.to_string())?;
 
+    crate::persist_subscription(&app, &sub);
     *state.subscription.lock().unwrap() = sub;
     Ok(())
 }

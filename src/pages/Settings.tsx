@@ -1023,11 +1023,16 @@ export default function Settings() {
     loadAuthState();
     const unlistenAuth = listen("auth:complete", () => loadAuthState());
     const unlistenUsage = listen("usage:updated", () => loadAuthState());
+    // Emitted by the Rust backend after the startup and 24h background
+    // subscription syncs succeed, so a slow/failed initial sync doesn't
+    // leave the UI stuck on whatever was cached (or default) at first paint.
+    const unlistenSubscription = listen("subscription:updated", () => loadAuthState());
     // The overlay's "renew" link opens this window straight to a given tab.
     const unlistenNav = listen<ActiveView>("settings:navigate", (e) => navigateTo(e.payload));
     return () => {
       unlistenAuth.then((fn) => fn());
       unlistenUsage.then((fn) => fn());
+      unlistenSubscription.then((fn) => fn());
       unlistenNav.then((fn) => fn());
     };
   }, [navigateTo]);
