@@ -1892,7 +1892,15 @@ pub fn run() {
                 .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => show_settings(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // Chrome counts AXEnhancedUserInterface enable/disable
+                        // requests. Balance any activation owned by the macOS
+                        // passive watcher before normal tray exit rather than
+                        // leaving Chrome in complete AX mode until Chrome quits.
+                        #[cfg(target_os = "macos")]
+                        selection_watcher::stop();
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .build(app)?;
