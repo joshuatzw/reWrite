@@ -821,7 +821,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
             <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 20, color: "var(--rw-text-primary)" }}>Plan &amp; billing</h3>
             <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: .5, textTransform: "uppercase", color: authState.is_subscribed ? "var(--rw-on-accent)" : "var(--rw-text-secondary)", background: authState.is_subscribed ? ACCENT : "var(--rw-bg-subtle)", padding: "5px 11px", borderRadius: 7, border: authState.is_subscribed ? "none" : "1px solid var(--rw-border)" }}>
-              {authState.is_subscribed ? "Pro" : "Free"}
+              {authState.is_subscribed ? (authState.plan === "max" ? "Max" : "Pro") : "Free"}
             </span>
           </div>
 

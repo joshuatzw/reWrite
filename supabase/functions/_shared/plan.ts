@@ -9,7 +9,7 @@ export function resolvePlan(priceId: string | undefined | null): Plan {
 }
 
 export const MONTHLY_LIMITS: Record<"free" | "pro" | "max", number> = {
-  free: 3,
+  free: 50,
   pro: 1000,
   max: 5000,
 };

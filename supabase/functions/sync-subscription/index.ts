@@ -41,6 +41,7 @@ serve(async (req) => {
       subscription_valid_until: null,
       trial_end: null,
       rewrite_count: profile?.rewrite_count ?? 0,
+      plan: null,
     });
   }
 
@@ -83,6 +84,7 @@ serve(async (req) => {
       subscription_valid_until,
       trial_end,
       rewrite_count: profile.rewrite_count ?? 0,
+      plan,
     });
   } catch (err) {
     console.error("sync-subscription: Stripe call failed, falling back to stored profile", err);
@@ -92,6 +94,7 @@ serve(async (req) => {
       subscription_valid_until: profile.subscription_valid_until ?? null,
       trial_end: null,
       rewrite_count: profile.rewrite_count ?? 0,
+      plan: profile.plan ?? null,
     });
   }
 });
