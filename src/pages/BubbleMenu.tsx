@@ -222,13 +222,18 @@ export default function BubbleMenu() {
               position: "absolute",
               inset: 4,
               borderRadius: "50%",
+              overflow: "hidden",
               background: "#ffffff",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
             }}
           >
-            <img src={logoBlack} alt="" style={{ width: 14, height: "auto", userSelect: "none", pointerEvents: "none" }} />
+            <img
+              src={logoBlack}
+              alt=""
+              style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%", userSelect: "none", pointerEvents: "none" }}
+            />
           </div>
         </div>
       </div>

@@ -129,7 +129,7 @@ export default function Processing() {
             <img
               src={logoBlack}
               alt="reWrite"
-              style={{ height: 25, width: "auto", userSelect: "none" }}
+              style={{ height: 44, width: 44, borderRadius: "50%", objectFit: "cover", userSelect: "none" }}
             />
           </div>
         )}

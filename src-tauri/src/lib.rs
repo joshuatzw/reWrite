@@ -160,6 +160,21 @@ pub fn remember_paste_target_window(app: &AppHandle) {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn remember_paste_target_window(_app: &AppHandle) {}
 
+/// Read-only accessor for `PASTE_TARGET_PID` — the pid of the app that owned
+/// the selection when it was last detected (see `remember_paste_target_window`
+/// above). Exposed as a function rather than making the static itself
+/// `pub(crate)`, matching this file's existing pattern for state private to
+/// `lib.rs` (`remember_paste_target_window`/`focus_paste_target_window`).
+/// Used by `selection_watcher`'s mac frontmost-app-switch check to avoid
+/// clearing the bubble just because the source app (not reWrite) is
+/// frontmost — which is the normal, expected state while the bubble is
+/// visible, since `show_bubble`/`show_bubble_menu` deliberately don't steal
+/// foreground. 0 means "never set" (no selection captured yet this session).
+#[cfg(target_os = "macos")]
+pub(crate) fn paste_target_pid() -> i32 {
+    PASTE_TARGET_PID.load(Ordering::SeqCst)
+}
+
 #[cfg(target_os = "windows")]
 pub fn focus_paste_target_window(_app: &AppHandle) {
     use windows::Win32::Foundation::HWND;
@@ -1872,7 +1887,7 @@ pub fn run() {
             };
 
             TrayIconBuilder::new()
-                .icon(tauri::include_image!("icons/rewrite_logo_taskbar.png"))
+                .icon(tauri::include_image!("icons/rewrite_new_icon_white.png"))
                 .menu(&menu)
                 .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
