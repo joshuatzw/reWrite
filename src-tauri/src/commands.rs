@@ -410,6 +410,14 @@ pub fn request_accessibility_permission(app: AppHandle, state: State<AppState>) 
     }
 }
 
+/// True only on macOS, where the Accessibility permission concept exists.
+/// The frontend uses this to platform-gate the Accessibility onboarding UI
+/// (sidebar item + tutorial view), which is meaningless on Windows.
+#[tauri::command]
+pub fn is_macos() -> bool {
+    cfg!(target_os = "macos")
+}
+
 /// Opens System Settings straight to Privacy & Security → Accessibility,
 /// same external-URL pattern as `open_checkout`/`open_billing_portal`.
 #[tauri::command]

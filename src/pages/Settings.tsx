@@ -105,7 +105,7 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
 
 // ── Home View ──────────────────────────────────────────────────────────────────
 
-function HomeView({ history, skillsConfig, config, authState, accessibilityGranted, onOpenAccessibility }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config; authState: AuthState; accessibilityGranted: boolean; onOpenAccessibility: () => void }) {
+function HomeView({ history, skillsConfig, config, authState, accessibilityGranted, isMacos, onOpenAccessibility }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config; authState: AuthState; accessibilityGranted: boolean; isMacos: boolean; onOpenAccessibility: () => void }) {
   const greet = getGreeting();
   const { streakDays, weekDots } = computeStreak(history);
   const { total, last7, weekWords } = computeWordStats(history);
@@ -130,7 +130,11 @@ function HomeView({ history, skillsConfig, config, authState, accessibilityGrant
         <p style={{ fontSize: 16, color: "var(--rw-text-muted)", marginTop: 10 }}>Let's knock something off your to-do list.</p>
       </header>
 
-      {!accessibilityGranted && (
+      {/* Accessibility is a macOS-only concept — see `is_macos` in
+          commands.rs. On Windows `accessibilityGranted` is already always
+          true so this is already hidden, but the explicit `isMacos` check
+          makes that intent robust rather than incidental. */}
+      {isMacos && !accessibilityGranted && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, background: "var(--rw-danger-bg)", border: "1px solid var(--rw-danger-border)", borderRadius: 13, padding: "14px 20px", marginBottom: 24 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ width: 10, height: 10, borderRadius: "50%", background: "var(--rw-danger)", flexShrink: 0 }} />
@@ -993,6 +997,11 @@ export default function Settings() {
   // never replays the first-run auto-continue behavior.
   const [accessibilityAutoOpened, setAccessibilityAutoOpened] = useState(false);
   const didInitialAccessCheck = useRef(false);
+  // Platform gate for the Accessibility UI (macOS-only concept — see
+  // `is_macos` in commands.rs). Starts `null` ("not checked yet") and joins
+  // the render gate below so the sidebar/Home never flash the Accessibility
+  // item before we know the platform.
+  const [isMacos, setIsMacos] = useState<boolean | null>(null);
 
   // Tracks the latest `active` for `navigateTo` below without needing
   // `navigateTo` itself to change identity on every navigation (it's used
@@ -1062,45 +1071,58 @@ export default function Settings() {
   // tutorial instead of Home. Only ever forces once — later renders just
   // keep `accessibilityGranted` in sync (see the sidebar status dot / Home
   // banner) without yanking the user back to this view.
+  // Fetched together (rather than as two separate effects) so both land in
+  // the same state update and the initial "force to accessibility" decision
+  // below can see both at once — avoids a race where one resolves before
+  // the other and either flashes Home or forces navigation before we know
+  // the platform.
   useEffect(() => {
-    invoke<boolean>("check_accessibility_permission")
-      .then((granted) => {
-        setAccessibilityGranted(granted);
-        if (!didInitialAccessCheck.current) {
-          didInitialAccessCheck.current = true;
-          if (!granted) {
-            setActive("accessibility");
-            setAccessibilityAutoOpened(true);
-          }
-        }
-      })
-      .catch(() => {
+    Promise.all([
+      invoke<boolean>("check_accessibility_permission").catch(() => {
         // IPC failure — don't get stuck on a permanent blank screen (see the
         // render gate below). Treat as granted; non-macOS always resolves
         // true anyway, and a real macOS failure here would be unusual.
-        setAccessibilityGranted(true);
+        return true;
+      }),
+      invoke<boolean>("is_macos").catch(() => false),
+    ]).then(([granted, macos]) => {
+      setAccessibilityGranted(granted);
+      setIsMacos(macos);
+      if (!didInitialAccessCheck.current) {
         didInitialAccessCheck.current = true;
-      });
+        // Accessibility is a macOS-only concept, so only ever force the
+        // tutorial open on macOS. On Windows `granted` is already always
+        // true, so this is belt-and-suspenders rather than load-bearing.
+        if (!granted && macos) {
+          setActive("accessibility");
+          setAccessibilityAutoOpened(true);
+        }
+      }
+    });
   }, []);
 
-  // Loading: block the first paint until BOTH auth state and the initial
-  // Accessibility check have resolved, so the user never sees a flash of
-  // Home before getting redirected to the tutorial (or a flash of an
-  // optimistic green sidebar dot before the real status is known).
-  if (authState === null || accessibilityGranted === null) return null;
+  // Loading: block the first paint until auth state, the initial
+  // Accessibility check, AND the platform check have resolved, so the user
+  // never sees a flash of Home before getting redirected to the tutorial (or
+  // a flash of an optimistic green sidebar dot before the real status is
+  // known, or a flash of the Accessibility nav item on Windows).
+  if (authState === null || accessibilityGranted === null || isMacos === null) return null;
 
   // Not logged in
   if (!authState.logged_in) return <LoginView onLogin={loadAuthState} />;
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", fontFamily: "'Hanken Grotesk', system-ui, sans-serif", background: "var(--rw-bg-secondary)" }}>
-      <Sidebar active={active} setActive={navigateTo} authState={authState} accessibilityGranted={accessibilityGranted} />
+      <Sidebar active={active} setActive={navigateTo} authState={authState} accessibilityGranted={accessibilityGranted} isMacos={isMacos} />
       <main className="rw-scroll" style={{ flex: 1, overflowY: "auto", background: "var(--rw-bg-primary)", position: "relative" }}>
-        {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} authState={authState} accessibilityGranted={accessibilityGranted} onOpenAccessibility={() => navigateTo("accessibility")} />}
+        {active === "home"     && <HomeView history={history} skillsConfig={skillsConfig} config={config} authState={authState} accessibilityGranted={accessibilityGranted} isMacos={isMacos} onOpenAccessibility={() => navigateTo("accessibility")} />}
         {active === "history"  && <HistoryView history={history} />}
         {active === "skills"   && (authState.is_subscribed ? <SkillsView /> : <SkillsLockedView />)}
         {active === "settings" && <SettingsView authState={authState} onLogout={loadAuthState} />}
-        {active === "accessibility" && (
+        {/* Accessibility is a macOS-only concept — see `is_macos` in
+            commands.rs — so this view is unreachable on Windows even if
+            `active` somehow got set to "accessibility". */}
+        {active === "accessibility" && isMacos && (
           <AccessibilityView
             isFirstRun={accessibilityAutoOpened}
             onStatusChange={setAccessibilityGranted}

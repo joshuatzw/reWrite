@@ -1910,6 +1910,7 @@ pub fn run() {
             commands::check_accessibility_permission,
             commands::request_accessibility_permission,
             commands::open_accessibility_settings,
+            commands::is_macos,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
