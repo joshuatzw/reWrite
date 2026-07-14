@@ -2,6 +2,13 @@
 
 This roadmap tracks the work needed to bring the existing reWrite experience to macOS. The basic rewrite flow should remain the same: select text anywhere, invoke reWrite, choose or apply a skill, and paste the result back into the source app without forcing a context switch.
 
+## Current status — 2026-07-14
+
+- Phases 1–4 have working macOS implementations and pass the available static build/test coverage.
+- Phase 4C now includes a reviewed Chrome main-application accessibility bootstrap, but Chrome web-field selection still requires the real-device verification documented below before it can be considered fixed.
+- Hotkeys remain the supported fallback wherever passive Accessibility selection detection is unavailable.
+- Release packaging remains open: real-device compatibility testing, signing/notarization, the `1.1.4` version alignment, and GitHub publication are not complete.
+
 ## Product goals
 
 - Preserve the current core loop: capture selected text, rewrite it, and paste the result back into the original app.
@@ -40,15 +47,18 @@ This roadmap tracks the work needed to bring the existing reWrite experience to 
   - [x] `selection_watcher.rs`: passive selection detection.
     Implemented 2026-07-11 as a first-pass macOS `CGEventTap` + Accessibility
     watcher that probes `AXSelectedText`/`AXBoundsForRange` and emits the
-    existing bubble events. Code-complete and passes build/test; NOT verified
-    on a real device. Multi-monitor clamping and app-compat testing remain
-    open.
+    existing bubble events. Multi-monitor clamping, Retina/logical-coordinate
+    handling, app-switch clearing, and the reviewed Chrome Phase 4C bootstrap
+    are implemented. Code-complete and passes build/test; Chrome and broader
+    app compatibility still require real-device verification.
 - [ ] Verify global shortcut registration for the existing hotkeys.
 - [ ] Confirm app windows behave correctly on macOS:
   - Overlay appears near the active display or selection target.
   - Processing window does not steal focus unnecessarily.
   - Settings window opens normally from tray/menu bar.
-- [ ] Add a macOS menu bar/tray equivalent with Settings and Quit.
+- [x] Add a macOS menu bar/tray equivalent with Settings and Quit.
+  The existing Tauri tray exposes both actions; Quit now also stops the macOS
+  selection watcher first so any Chrome accessibility activation is balanced.
 
 ## Phase 2 — Accessibility permission tutorial
 
@@ -162,15 +172,13 @@ This is the Mac version of the passive selection bubble: when the user highlight
   `project.md`.
 
 
-  ##Phase 4B:
-  1. macOS: The bubble menu has excess space below the available options, sizing should be dynamic depending on the number of skills. Maximum of 4 skills in container no wrap text, scrollable
-2. Version number inconsistency
-    1. Sidebar says v1.0.6, but in settings it is v1.0.7
-3. Skill needs to be saved on the cloud so it can be update between devices
-    1. 
-4. Accessibility Menu 
-- This menu is appearing on windows as well —> This should only appear if user opens it on a mac.
-- "Granted! reWrite is ready to go.” is green by default —> this needs to be truly dependent on whether the system has granted rights to it.
+## Phase 4B — Follow-up gaps
+
+- [ ] Make the macOS bubble menu height dynamic based on the number of enabled skills: show at most four rows, prevent title wrapping, and scroll additional skills.
+- [ ] Align every release version source to `1.1.4`. The current tree is inconsistent: primary package/Tauri/Cargo/Settings sources report `1.1.3`, while the root `package-lock.json` metadata still reports `1.1.2`.
+- [ ] Store custom skills in the cloud so they synchronize across signed-in devices.
+- [ ] Confirm the Accessibility navigation entry is macOS-only and never appears on Windows.
+- [ ] Confirm “Granted! reWrite is ready to go.” is rendered only from the live macOS Accessibility permission result, never as an optimistic/default state.
 
 ## Phase 4C — Fix: bubble never appears in Chrome (and other Chromium-based apps)
 
@@ -181,7 +189,7 @@ Real symptom report 2026-07-12: "rewrite bubble is not coming up on Chrome brows
   - Test in Chrome: `probe_selection -> None` on every attempt across a multi-minute session, so `selection:detected` never fires and no bubble ever shows.
   - Test in Notion (Electron/Chromium-based desktop app): same `None`-on-every-attempt symptom as Chrome.
 - [x] Identify root cause: Chromium-based renderers (Chrome, and Electron apps like Notion, which embed Chromium) only populate the accessibility tree that `AXSelectedText`/`AXSelectedTextRange`/`AXBoundsForRange` read from once they detect an actively-watching assistive-technology client (normally VoiceOver). This module's passive, read-only AX polling never triggers that activation, so both `probe_selection` code paths (focused element, and the Phase 4 Electron hit-test fallback) find a real AX element at the cursor/focus but it never carries selection data — indefinitely, not intermittently.
-- [x] Implement fix in `selection_watcher.rs` (mac backend only): when both selection lookups in `probe_selection` come back empty but did find a real element, read that element's pid (`AXUIElementGetPid`) and call `maybe_activate_manual_accessibility(pid)`, which sets Chromium's documented `AXManualAccessibility` attribute to `true` on the app's own `AXUIElementRef` (`AXUIElementCreateApplication(pid)`, not the system-wide element used elsewhere in this file). This forces the target process into full accessibility mode, the same state VoiceOver would put it in. Attempted once per pid (`AX_ACTIVATED_PIDS`, never evicted — re-asking a reused pid is a harmless no-op); non-Chromium apps simply return `kAXErrorAttributeUnsupported` for the attribute set, which is discarded, so no bundle-id/browser allowlist is needed — the same code path runs for every app.
+- [x] First attempted fix in `selection_watcher.rs` (mac backend only): when both selection lookups come back empty but did find a real element, read that element's pid (`AXUIElementGetPid`) and set `AXManualAccessibility=true` on that exact focused/hit-tested element. Attempted once per element pid (`AX_ACTIVATED_PIDS`); unsupported targets discard the error. This remains as a useful Electron/reachable-element path, but the 2026-07-14 live pass below proved it cannot bootstrap Chrome web content because the only reachable element there is `AXScrollArea`, which rejects the attribute.
 - [x] `cargo check --lib --bins`, `cargo test --lib --bins` (23 tests, unchanged) pass.
 - [ ] **Real-device re-verification of the fix is still needed** — see caveat below before checking this box.
 
@@ -199,10 +207,10 @@ Net: there is a real **bootstrapping problem** — every element reachable via p
 
 - [x] Real-device re-verification done (2026-07-14): confirms Chrome web-editable selection still does **not** show the bubble. Reverted all diagnostic scaffolding.
 - [x] Shipped the reviewed **editable-role gate** (`is_editable_role` + role-based branch in `is_element_editable`, mac backend) — correct, unit-tested improvement that classifies editable-vs-read-only for elements the probe *can* reach (native controls, WebKit, Chrome's native address bar). Does not, by itself, resolve the Chrome web-content case above.
-- [ ] **Still open — Chrome/Chromium web-content selection detection.** Candidate approaches, in rough order of promise:
-  - **App-element via frontmost main pid.** Get Chrome's *main* process pid (not the renderer pid the web nodes report — e.g. via `NSWorkspace.frontmostApplication`, which `lib.rs`'s `remember_paste_target_window` already uses), `AXUIElementCreateApplication(main_pid)`, assert `AXManualAccessibility`, then read `AXFocusedUIElement`. Uncertain: prior work found app-level `AXManualAccessibility` *set* returns `-25205`; needs empirical check of whether the read still resolves the field once activated.
-  - **Delayed re-probe after activation.** Since the tree populates asynchronously, schedule a second probe ~150–300ms after a first activation on a given pid, instead of relying on the next user selection.
-  - **Explicit gesture + clipboard capture for Chromium.** Fall back to a hotkey/gesture that copies via Cmd+C and reads the clipboard (reusing the existing `clipboard.rs` + overlay infra). Reliable across Chrome/Electron/native, but changes the UX from passive-on-highlight to highlight-then-trigger for these apps.
+- [x] **2026-07-14 implementation pass — main-application activation bootstrap.** Current Chromium source identifies the missing signal: Chrome's `BrowserCrApplication` listens for application-level `AXEnhancedUserInterface`, not `AXManualAccessibility`, and on macOS Sonoma+ deliberately debounces that request for two seconds before enabling complete web accessibility. The mac watcher now resolves the frontmost application's *main* pid **and bundle id** through `NSWorkspace` on the main thread and creates `AXUIElementCreateApplication(main_pid)`. It first tries the narrower app-level `AXManualAccessibility` route used by Electron. Only when that exact attribute is unsupported and a pure allowlist recognizes a Chromium browser bundle family (Chrome channels/Chromium/Edge/Brave/Arc/Vivaldi/Opera) does it set the stronger `AXEnhancedUserInterface=true`; native, unknown, and Electron apps never receive that enhanced signal. One successful activation per pid schedules a non-blocking re-probe after three seconds. The follow-up probe reads both the application's `AXFocusedUIElement` and an application-scoped point hit-test, which should finally reach the editable web descendant after Chrome publishes its tree. Successful activation is balanced back to `false` when the watcher stops, including the normal macOS tray-Quit path before `app.exit(0)`. Chromium primary source: [`chrome_browser_application_mac.mm`](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/chrome_browser_application_mac.mm).
+- [x] **Editable-only behavior is preserved by construction.** Every element found by either new application-scoped path still flows through the existing `selection_from_element` → `is_element_editable` gate. The narrow editable-role allowlist is unchanged, so Chrome's read-only paragraph/`AXStaticText`/`AXWebArea` content remains ineligible.
+- [x] Static verification: `cargo check --lib --bins` and `cargo test --lib --bins` pass (27 tests, including Chromium-bundle allow/reject coverage). `cargo fmt -- --check` still reports two pre-existing formatting diffs outside this macOS change (`commands.rs` and the Windows-only `is_element_editable` block); the new Phase 4C code itself matches rustfmt output.
+- [ ] **Real-device Chrome re-verification remains required.** With a fresh Chrome process and Accessibility granted, select at least two characters in the test page's `<textarea>`, `<input>`, and contenteditable field. On the first failed probe, confirm the trace contains Chrome's *main* pid and bundle id, `AXManualAccessibility err=-25205`, then `AXEnhancedUserInterface err=0`; leave the selection intact and confirm the bubble appears after the delayed re-probe (~3.2 seconds including worker debounce). Subsequent selections in the same Chrome process should appear on the normal ~200ms path. Confirm a read-only paragraph selection still produces no bubble. In Notes/Finder, also confirm a failed probe logs `AXEnhancedUserInterface not attempted`. Disable the Selection bubble toggle and confirm the trace records `AXEnhancedUserInterface=false err=0`; re-enable, activate Chrome again, then choose **Quit reWrite** from the tray and confirm the same balancing false trace occurs before process exit. Repeat the editable/read-only checks in one Electron app: it should activate through `AXManualAccessibility err=0` with enhanced explicitly not attempted. Do not mark this fixed until these results are observed; if Chrome accepts activation but its application-scoped focus/hit-test still returns only `AXScrollArea`, the remaining fallback is the existing explicit hotkey + Cmd+C capture flow rather than weakening the editable gate.
 
 ## Phase 5 — Mac polish and reliability
 
