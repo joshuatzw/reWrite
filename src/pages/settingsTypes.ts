@@ -4,6 +4,7 @@ export interface AuthState {
   is_subscribed: boolean;
   subscription_valid_until: string | null;
   rewrite_count: number;
+  plan: "pro" | "max" | null;
 }
 
 export type ActiveView = "home" | "history" | "skills" | "settings" | "accessibility";

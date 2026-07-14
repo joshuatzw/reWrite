@@ -637,6 +637,7 @@ pub struct AuthState {
     pub is_subscribed: bool,
     pub subscription_valid_until: Option<String>,
     pub rewrite_count: u32,
+    pub plan: Option<String>,
 }
 
 #[tauri::command]
@@ -652,6 +653,7 @@ pub fn get_auth_state(state: State<AppState>) -> AuthState {
         is_subscribed: sub.is_subscribed,
         subscription_valid_until: sub.subscription_valid_until.clone(),
         rewrite_count: sub.rewrite_count,
+        plan: sub.plan.clone(),
     }
 }
 

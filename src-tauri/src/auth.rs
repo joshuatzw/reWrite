@@ -20,6 +20,8 @@ pub struct SubscriptionCache {
     pub subscription_valid_until: Option<String>,
     pub rewrite_count: u32,
     pub synced_at: Option<i64>,
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 // ── Disk I/O ──────────────────────────────────────────────────────────────────
@@ -150,6 +152,7 @@ struct SyncResponse {
     is_subscribed: bool,
     subscription_valid_until: Option<String>,
     rewrite_count: Option<u32>,
+    plan: Option<String>,
 }
 
 pub async fn sync_subscription(
@@ -174,6 +177,7 @@ pub async fn sync_subscription(
         subscription_valid_until: data.subscription_valid_until,
         rewrite_count: data.rewrite_count.unwrap_or(0),
         synced_at: Some(now_secs()),
+        plan: data.plan,
     })
 }
 

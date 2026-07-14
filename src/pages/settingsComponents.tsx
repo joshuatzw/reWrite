@@ -116,7 +116,7 @@ export function Sidebar({ active, setActive, authState, accessibilityGranted }: 
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
-            <div style={{ fontSize: 11.5, color: "var(--rw-text-muted)" }}>{authState.is_subscribed ? "reWrite Pro" : "Free plan"}</div>
+            <div style={{ fontSize: 11.5, color: "var(--rw-text-muted)" }}>{authState.is_subscribed ? (authState.plan === "max" ? "reWrite Max" : "reWrite Pro") : "Free plan"}</div>
           </div>
         </div>
         <div style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontSize: 13, color: "var(--rw-text-faint)", paddingLeft: 4 }}>Version {APP_VERSION}</div>
