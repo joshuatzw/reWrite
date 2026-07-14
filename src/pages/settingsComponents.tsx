@@ -96,7 +96,7 @@ function NavButton({ label, icon, active, onClick, locked, dot }: { label: strin
   );
 }
 
-export function Sidebar({ active, setActive, authState, accessibilityGranted }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState; accessibilityGranted: boolean }) {
+export function Sidebar({ active, setActive, authState, accessibilityGranted, isMacos }: { active: ActiveView; setActive: (v: ActiveView) => void; authState: AuthState; accessibilityGranted: boolean; isMacos: boolean }) {
   return (
     <aside style={{ width: 250, minWidth: 250, background: "var(--rw-bg-secondary)", borderRight: "1px solid var(--rw-border)", display: "flex", flexDirection: "column", padding: "30px 20px 22px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 4px 30px" }}>
@@ -106,7 +106,12 @@ export function Sidebar({ active, setActive, authState, accessibilityGranted }: 
         <NavButton label="Home"     icon={<IconHome />}    active={active === "home"}     onClick={() => setActive("home")} />
         <NavButton label="History"  icon={<IconHistory />} active={active === "history"}  onClick={() => setActive("history")} />
         <NavButton label="Skills"   icon={<IconBook />}    active={active === "skills"}   onClick={() => setActive("skills")} locked={!authState.is_subscribed} />
-        <NavButton label="Accessibility" icon={<IconShield />} active={active === "accessibility"} onClick={() => setActive("accessibility")} dot={accessibilityGranted ? "var(--rw-success)" : "var(--rw-danger)"} />
+        {/* Accessibility is a macOS-only concept (System Settings → Privacy
+            & Security → Accessibility) — no equivalent exists on Windows, so
+            this item is unreachable there. See `is_macos` in commands.rs. */}
+        {isMacos && (
+          <NavButton label="Accessibility" icon={<IconShield />} active={active === "accessibility"} onClick={() => setActive("accessibility")} dot={accessibilityGranted ? "var(--rw-success)" : "var(--rw-danger)"} />
+        )}
         <NavButton label="Settings" icon={<IconGear />}    active={active === "settings"} onClick={() => setActive("settings")} />
       </nav>
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
