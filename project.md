@@ -26,6 +26,16 @@ At minimum, update:
 
 ## Recent Updates
 
+### 2026-07-14 (version 1.1.2)
+
+- Bumped the application/build version to `1.1.2` across the npm package metadata, Cargo package metadata and lockfile, Tauri configuration, and the Settings UI version label.
+
+### 2026-07-14 (rewrite scope guard no longer rejects conversational prose)
+
+- Removed the Anthropic/model-side scope-classification sentinel from `supabase/functions/rewrite/index.ts`. The model is now explicitly told that short conversational messages, thanks, questions, requests, and prose mentioning debugging or problem-solving are valid input to transform, rather than prompts to answer or reject.
+- Retained the deterministic pre-request code-pattern filter as the only scope gate. It still rejects clear structural source code, fenced code blocks, imports, and SQL before usage is charged, while prose is always sent through the selected rewrite/refine/translate skill. This avoids false `scope_violation` responses caused by subjective model intent classification.
+- Deployment status: the desktop app still reaches an older hosted `rewrite` function (confirmed because its returned error string exists only in the pre-fix Git history). Two `npx supabase functions deploy rewrite --project-ref jrzcedtyqyzfqbfuabxa` attempts uploaded the assets but failed at Supabase's deploy API with `UnknownError: TransportError`; even `supabase functions list` failed with `TransportError`. The local fix is therefore not yet active in production and must be redeployed once the Supabase management API is reachable.
+
 ### 2026-07-11 (macOS dark mode — critical-review fixes: AccessibilityView.tsx converted, Toggle dark-mode contrast fixed)
 
 A critical review of the dark mode work below (previous entry) confirmed the main suspected regression was a non-issue (the `ACCENT` -> `"var(--rw-accent)"` conversion is safe — traced all 8 usage sites, none do hex-alpha string concatenation or other manipulation that would break on a `var(...)` string) but found two real defects, both now fixed:
