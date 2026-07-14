@@ -201,6 +201,16 @@ pub async fn send_magic_link(client: &reqwest::Client, email: &str) -> Result<()
     Ok(())
 }
 
+// ── Google OAuth ──────────────────────────────────────────────────────────────
+
+/// Supabase's Google OAuth (implicit flow) authorize URL. Redirects back to
+/// the same `rewrite://auth#access_token=...&refresh_token=...` fragment that
+/// magic link uses, so the deep-link handler and `parse_auth_url` need no
+/// changes.
+pub fn google_login_url() -> String {
+    format!("{SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=rewrite%3A%2F%2Fauth")
+}
+
 // ── User info ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

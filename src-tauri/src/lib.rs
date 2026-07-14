@@ -1925,6 +1925,7 @@ pub fn run() {
             commands::get_history,
             commands::get_auth_state,
             commands::send_magic_link,
+            commands::open_google_login,
             commands::logout,
             commands::open_checkout,
             commands::open_billing_portal,

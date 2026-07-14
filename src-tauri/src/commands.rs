@@ -673,6 +673,17 @@ pub async fn send_magic_link(email: String, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
+pub fn open_google_login(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let url = crate::auth::google_login_url();
+
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
         crate::auth::clear_session(&path);
