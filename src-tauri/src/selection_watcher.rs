@@ -39,7 +39,7 @@ mod win {
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-        UIA_TextPatternId,
+        IUIAutomationValuePattern, UIA_TextPatternId, UIA_ValuePatternId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowRect, IsWindow, SetForegroundWindow,
@@ -431,9 +431,43 @@ mod win {
         Ok(None)
     }
 
+    /// Whether `element` is an editable text control, as opposed to read-only
+    /// content (a web article, a PDF viewer page, chat message history, etc.)
+    /// that merely happens to expose `TextPattern` so screen readers can read
+    /// it. This is what confines the rewrite bubble to text fields — without
+    /// it, any selectable text anywhere satisfies `probe_selection` below.
+    ///
+    /// `ValuePattern.CurrentIsReadOnly()` is the only signal used: live
+    /// tracing against real content showed it's the one reliable indicator —
+    /// editable surfaces (Notepad's edit control, browser address/search
+    /// boxes, Chromium contenteditable) consistently report `IsReadOnly() ==
+    /// false`, and a read-only Chromium document root correctly reports
+    /// `true`. `TextEditPattern` availability looked like a plausible
+    /// fallback for controls that don't expose `ValuePattern`, but tracing
+    /// showed Chromium hands it out even on a plain read-only "Text"
+    /// control-type paragraph (the exact article-reading case this is meant
+    /// to exclude), so it's not used. If `ValuePattern` isn't present at all,
+    /// the element is treated as not editable; this deliberately fails closed
+    /// (no bubble) rather than open, since popping the bubble over read-only
+    /// content is the exact bug being fixed here.
+    fn is_element_editable(element: &IUIAutomationElement) -> bool {
+        let Ok(value_pattern) =
+            (unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) })
+        else {
+            return false;
+        };
+        unsafe { value_pattern.CurrentIsReadOnly() }
+            .map(|read_only| !read_only.as_bool())
+            .unwrap_or(false)
+    }
+
     fn selection_from_element(
         element: &IUIAutomationElement,
     ) -> WinResult<Option<(String, Vec<(f64, f64, f64, f64)>)>> {
+        if !is_element_editable(element) {
+            return Ok(None);
+        }
+
         let text_pattern: IUIAutomationTextPattern =
             match unsafe { element.GetCurrentPatternAs(UIA_TextPatternId) } {
                 Ok(p) => p,
@@ -595,6 +629,7 @@ mod mac {
     const AX_SELECTED_TEXT: &str = "AXSelectedText";
     const AX_SELECTED_TEXT_RANGE: &str = "AXSelectedTextRange";
     const AX_BOUNDS_FOR_RANGE: &str = "AXBoundsForRange";
+    const AX_VALUE: &str = "AXValue";
 
     type AXError = i32;
     type AXValueType = u32;
@@ -721,6 +756,11 @@ mod mac {
             parameterized_attribute: CFStringRef,
             parameter: CFTypeRef,
             value: *mut CFTypeRef,
+        ) -> AXError;
+        fn AXUIElementIsAttributeSettable(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            settable: *mut Boolean,
         ) -> AXError;
         // Signature confirmed via Apple's published reference docs (see
         // coordinate-space research note above `use` block): takes 32-bit
@@ -1242,9 +1282,33 @@ mod mac {
         result
     }
 
+    /// Whether `element` is an editable text control, mirroring the Windows
+    /// backend's `is_element_editable` (see that function's doc comment for
+    /// why this gate exists — it's what confines the rewrite bubble to text
+    /// fields instead of any selectable text, e.g. a Safari article). AX has
+    /// no single "read-only" flag equivalent to UIA's `ValuePattern`, but
+    /// `AXUIElementIsAttributeSettable` on `AXValue` is the direct analog:
+    /// true only for controls whose value/text can actually be edited. Fails
+    /// closed (not editable) on any AX error, same rationale as the Windows
+    /// side — read-only content must never win a probe error's benefit of
+    /// the doubt.
+    unsafe fn is_element_editable(element: AXUIElementRef) -> bool {
+        let Ok(attr) = cfstring(AX_VALUE) else {
+            return false;
+        };
+        let mut settable: Boolean = 0;
+        let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
+        CFRelease(attr as CFTypeRef);
+        err == AX_ERROR_SUCCESS && settable != 0
+    }
+
     unsafe fn selection_from_element(
         element: AXUIElementRef,
     ) -> Result<Option<(String, CGRect)>, String> {
+        if !is_element_editable(element) {
+            return Ok(None);
+        }
+
         let mut selected_text: CFTypeRef = std::ptr::null();
         let attr = cfstring(AX_SELECTED_TEXT)?;
         let err = AXUIElementCopyAttributeValue(element, attr, &mut selected_text);
