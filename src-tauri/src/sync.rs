@@ -5,7 +5,12 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{auth, history::HistoryEntry, skills::SkillsConfig, AppState};
+use crate::{
+    auth,
+    history::HistoryEntry,
+    skills::{merge_configs, SkillsConfig},
+    AppState,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CloudHistoryMeta {
@@ -226,141 +231,132 @@ pub fn spawn_push_history(app: AppHandle, entry: HistoryEntry) {
     });
 }
 
-pub fn spawn_push_skills(app: AppHandle, config: SkillsConfig, updated_at_ms: i64) {
+/// A local skill edit cannot optimistically push its own blob: doing so
+/// would clobber other devices' concurrent edits. Instead it must pull,
+/// merge, and push the merged (superset) result.
+pub fn spawn_push_skills(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let result = async {
-            let (client, token, user_id) = current_identity(&app).await?;
-            push_skills(&client, &token, &user_id, &config, updated_at_ms).await
-        }
-        .await;
-        if let Err(error) = result {
+        if let Err(error) = sync_skills(&app).await {
             crate::trace(&format!("cloud sync: skills push skipped/failed: {error}"));
         }
     });
 }
 
-/// Best-effort account reconciliation. Call only from a background task.
-pub async fn sync_all(app: &AppHandle) -> Result<()> {
+/// Best-effort history reconciliation: ID-union pull, then push whatever the
+/// cloud is missing. Call only from a background task.
+async fn sync_history(app: &AppHandle) -> Result<()> {
     let (client, access_token, user_id) = current_identity(app).await?;
     let state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("app state unavailable"))?;
-
-    let history_entries_to_push = match pull_history_meta(&client, &access_token, &user_id).await {
-        Ok(cloud_entries) => {
-            let cloud_ids: HashSet<String> =
-                cloud_entries.iter().map(|row| row.id.clone()).collect();
-            let (entries_to_push, changed) = {
-                // Keep the mutex through save so an append cannot land between
-                // a stale clone and assignment and then be overwritten.
-                let mut local = state.history.lock().unwrap();
-                let local_ids: HashSet<String> =
-                    local.entries.iter().map(|entry| entry.id.clone()).collect();
-                let mut changed = false;
-                for row in cloud_entries {
-                    if !local_ids.contains(&row.id) {
-                        local.entries.push(HistoryEntry {
-                            id: row.id,
-                            timestamp_ms: row.timestamp_ms,
-                            skill_id: row.skill_id,
-                            skill_name: row.skill_name,
-                            input_text: String::new(),
-                            output_text: String::new(),
-                            output_word_count: row.output_word_count,
-                        });
-                        changed = true;
-                    }
-                }
-                if changed {
-                    let path = app.path().app_config_dir()?.join("history.json");
-                    crate::history::save(&local, &path)?;
-                }
-                (local.entries.clone(), changed)
-            };
-            if changed {
-                let _ = app.emit("history:updated", ());
-            }
-
-            entries_to_push
-                .iter()
-                .filter(|entry| !cloud_ids.contains(entry.id.as_str()))
-                .cloned()
-                .collect()
-        }
-        Err(error) => {
-            crate::trace(&format!("cloud sync: history pull failed: {error}"));
-            Vec::new()
-        }
-    };
-
-    let pulled_skills = pull_skills(&client, &access_token, &user_id).await;
-    let mut skills_changed = false;
-    let pending_push = match pulled_skills {
-        Ok(cloud_row) => {
-            // Serialize the decision and local persistence with command saves;
-            // all snapshots are taken after the network pull returns.
-            let _write = state.skills_write_lock.lock().unwrap();
-            let skills_path = app.path().app_config_dir()?.join("skills.json");
-            let local_updated_at_ms = crate::skills::load_updated_at_ms(&skills_path);
-            let local_config = state.skills_config.lock().unwrap().clone();
-            match cloud_row {
-                Some((cloud_config, cloud_updated_at_ms))
-                    if cloud_updated_at_ms > local_updated_at_ms =>
-                {
-                    crate::skills::save(&cloud_config, &skills_path)?;
-                    crate::skills::save_updated_at_ms(&skills_path, cloud_updated_at_ms)?;
-
-                    let config_path = app.path().app_config_dir()?.join("config.toml");
-                    let mut app_config = state.config.lock().unwrap().clone();
-                    app_config.default_skill_id = cloud_config.default_skill_id.clone();
-                    crate::config::save(&app_config, &config_path)?;
-
-                    *state.skills_config.lock().unwrap() = cloud_config;
-                    *state.config.lock().unwrap() = app_config;
-                    skills_changed = true;
-                    None
-                }
-                _ => {
-                    let timestamp = if local_updated_at_ms == 0 {
-                        let timestamp = crate::skills::next_updated_at_ms(&skills_path);
-                        crate::skills::save(&local_config, &skills_path)?;
-                        crate::skills::save_updated_at_ms(&skills_path, timestamp)?;
-                        timestamp
-                    } else {
-                        local_updated_at_ms
-                    };
-                    Some((local_config, timestamp))
-                }
+    let cloud_entries = pull_history_meta(&client, &access_token, &user_id).await?;
+    let cloud_ids: HashSet<String> = cloud_entries.iter().map(|row| row.id.clone()).collect();
+    let (entries_to_push, changed) = {
+        // Keep the mutex through save so an append cannot land between a
+        // stale clone and assignment and then be overwritten.
+        let mut local = state.history.lock().unwrap();
+        let local_ids: HashSet<String> =
+            local.entries.iter().map(|entry| entry.id.clone()).collect();
+        let mut changed = false;
+        for row in cloud_entries {
+            if !local_ids.contains(&row.id) {
+                local.entries.push(HistoryEntry {
+                    id: row.id,
+                    timestamp_ms: row.timestamp_ms,
+                    skill_id: row.skill_id,
+                    skill_name: row.skill_name,
+                    input_text: String::new(),
+                    output_text: String::new(),
+                    output_word_count: row.output_word_count,
+                });
+                changed = true;
             }
         }
-        Err(error) => {
-            crate::trace(&format!("cloud sync: skills pull failed: {error}"));
-            None
+        if changed {
+            let path = app.path().app_config_dir()?.join("history.json");
+            crate::history::save(&local, &path)?;
         }
+        (local.entries.clone(), changed)
     };
-    if skills_changed {
-        let _ = app.emit("skills:updated", ());
-    }
-    if let Some((config, updated_at_ms)) = pending_push {
-        if let Err(error) =
-            push_skills(&client, &access_token, &user_id, &config, updated_at_ms).await
-        {
-            crate::trace(&format!(
-                "cloud sync: skills reconcile push failed: {error}"
-            ));
-        }
+    if changed {
+        let _ = app.emit("history:updated", ());
     }
 
-    // Replay can be large, so it runs only after the single skills LWW
-    // decision instead of delaying cross-device skill availability.
-    for entry in &history_entries_to_push {
+    for entry in entries_to_push
+        .iter()
+        .filter(|entry| !cloud_ids.contains(entry.id.as_str()))
+    {
         if let Err(error) = push_history_meta(&client, &access_token, &user_id, entry).await {
             crate::trace(&format!(
                 "cloud sync: history reconcile push failed: {error}"
             ));
         }
     }
+    Ok(())
+}
 
+/// Best-effort skills reconciliation: pull the cloud blob, merge it with the
+/// local config per-id (skills union, tombstones win over stale edits,
+/// scalars LWW), persist+adopt the merge locally, then push the merge back
+/// so the cloud row always ends up a superset of both sides.
+async fn sync_skills(app: &AppHandle) -> Result<()> {
+    let (client, access_token, user_id) = current_identity(app).await?;
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("app state unavailable"))?;
+    let cloud = pull_skills(&client, &access_token, &user_id).await?;
+
+    let (merged, changed, should_push) = reconcile_local_skills(app, &state, &cloud)?;
+    if changed {
+        let _ = app.emit("skills:updated", ());
+    }
+    if should_push {
+        let cloud_row_ts = cloud.map(|(_, ts)| ts).unwrap_or(0);
+        let row_ts = crate::history::now_ms().max(cloud_row_ts + 1);
+        push_skills(&client, &access_token, &user_id, &merged, row_ts).await?;
+    }
+    Ok(())
+}
+
+/// Merges `cloud` into the local config under the write lock and, on change,
+/// persists + adopts it. Kept synchronous (no `.await` while the lock is
+/// held) so the caller's future stays `Send` across the push below.
+/// Returns (merged, local_changed, cloud_needs_push).
+fn reconcile_local_skills(
+    app: &AppHandle,
+    state: &AppState,
+    cloud: &Option<(SkillsConfig, i64)>,
+) -> Result<(SkillsConfig, bool, bool)> {
+    let _write = state.skills_write_lock.lock().unwrap();
+    let skills_path = app.path().app_config_dir()?.join("skills.json");
+    let local = state.skills_config.lock().unwrap().clone();
+    let merged = match cloud {
+        Some((cloud_config, _)) => merge_configs(&local, cloud_config),
+        None => local.clone(),
+    };
+    let changed = merged != local;
+    if changed {
+        crate::skills::save(&merged, &skills_path)?;
+        crate::commands::mirror_default_skill(app, state, &merged).map_err(|e| anyhow!("{e}"))?;
+        *state.skills_config.lock().unwrap() = merged.clone();
+    }
+    let should_push = match cloud {
+        Some((cloud_config, _)) => merged != *cloud_config,
+        None => true,
+    };
+    Ok((merged, changed, should_push))
+}
+
+/// Best-effort account reconciliation. Call only from a background task.
+/// Both halves run even if one fails, so an outage in one does not block
+/// the other's cross-device sync.
+pub async fn sync_all(app: &AppHandle) -> Result<()> {
+    if let Err(error) = sync_history(app).await {
+        crate::trace(&format!("cloud sync: history sync failed: {error}"));
+    }
+    if let Err(error) = sync_skills(app).await {
+        crate::trace(&format!("cloud sync: skills sync failed: {error}"));
+    }
     Ok(())
 }
 
