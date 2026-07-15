@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const SUPABASE_URL: &str = "https://jrzcedtyqyzfqbfuabxa.supabase.co";
+
+/// Hosted landing page that both Google OAuth and magic-link redirect to after
+/// auth. It renders a success state in the browser, then re-dispatches the
+/// `#access_token=...` fragment to the app via the `rewrite://auth` deep link
+/// (Supabase can't serve renderable HTML from its own origin, and the implicit
+/// flow's token lives in the URL fragment, so the bounce must be client-side).
+pub const AUTH_REDIRECT_URL: &str = "https://www.rewriteai.dev/auth/success";
 pub const SUPABASE_ANON_KEY: &str =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyemNlZHR5cXl6ZnFiZnVhYnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzNjk2ODUsImV4cCI6MjA5Nzk0NTY4NX0.Qe5HCqlmP8z--ZsI3w8uw1QtMF60udrWV7XsuT9Lay4";
 
@@ -188,7 +195,7 @@ pub async fn send_magic_link(client: &reqwest::Client, email: &str) -> Result<()
         .post(format!("{SUPABASE_URL}/auth/v1/otp"))
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Content-Type", "application/json")
-        .query(&[("redirect_to", "rewrite://auth")])
+        .query(&[("redirect_to", AUTH_REDIRECT_URL)])
         .json(&serde_json::json!({ "email": email }))
         .send()
         .await?;
@@ -203,12 +210,18 @@ pub async fn send_magic_link(client: &reqwest::Client, email: &str) -> Result<()
 
 // ── Google OAuth ──────────────────────────────────────────────────────────────
 
-/// Supabase's Google OAuth (implicit flow) authorize URL. Redirects back to
-/// the same `rewrite://auth#access_token=...&refresh_token=...` fragment that
-/// magic link uses, so the deep-link handler and `parse_auth_url` need no
-/// changes.
+/// Supabase's Google OAuth (implicit flow) authorize URL. Redirects to the
+/// hosted `AUTH_REDIRECT_URL` success page, which bounces the
+/// `#access_token=...&refresh_token=...` fragment back to the app via the
+/// `rewrite://auth` deep link — so the deep-link handler and `parse_auth_url`
+/// need no changes.
 pub fn google_login_url() -> String {
-    format!("{SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=rewrite%3A%2F%2Fauth")
+    let mut url = reqwest::Url::parse(&format!("{SUPABASE_URL}/auth/v1/authorize"))
+        .expect("authorize URL is a valid, hard-coded base");
+    url.query_pairs_mut()
+        .append_pair("provider", "google")
+        .append_pair("redirect_to", AUTH_REDIRECT_URL);
+    url.into()
 }
 
 // ── User info ─────────────────────────────────────────────────────────────────

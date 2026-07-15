@@ -1075,6 +1075,10 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
         return;
     };
 
+    // Bring the settings window forward so the user lands back in the app
+    // (already signed in) after the browser hands off the tokens.
+    show_settings(app);
+
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let Some(state) = app.try_state::<AppState>() else {
