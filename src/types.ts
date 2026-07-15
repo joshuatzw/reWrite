@@ -11,6 +11,7 @@ export interface SkillsConfig {
   global_instructions: string;
   skills: Skill[];
   builtin_enabled: Record<string, boolean>;
+  default_skill_id: string;
 }
 
 export interface Config {

@@ -1,6 +1,6 @@
 # reWrite Project Guide
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 This is the living project map for reWrite. Update this file whenever code, architecture, features, commands, data flow, configuration, or known status changes. Treat it as the first orientation document for future agents before they edit the repository.
 
@@ -9,6 +9,7 @@ This is the living project map for reWrite. Update this file whenever code, arch
 - Core Windows rewrite flow works: select text, trigger a hotkey, choose/apply a skill, rewrite through the Supabase Edge Function, and paste back into the source app.
 - Passive selection bubble work exists for Windows and is documented in `v1.1.0-selection-bubble.md`.
 - SaaS billing/auth work exists across Supabase Edge Functions and Tauri auth commands; the strategic billing plan is in `roadmap.md`.
+- Account-scoped cloud sync for skills/default skill and privacy-preserving history metadata is implemented in code. Local rewrites remain fully usable offline; startup/login reconciliation derives cross-device streaks and word totals without uploading input/output prose. Migration `006_cloud_sync.sql` still needs deployment plus two-account RLS and real cross-device verification.
 - Mac planning is in `roadmap-mac.md`. The Accessibility permission tutorial (Phase 2), macOS global Escape-key dismissal (`esc_hook.rs`, Phase 1), hotkey capture/paste plumbing (Phase 3), and macOS selection bubble watcher (Phase 4) are code-complete enough to compile/build/test. A 2026-07-11 fix now starts/stops the macOS selection watcher when Accessibility polling observes grant/revoke, closing the first-run "permission granted but bubble watcher never started" gap. A second 2026-07-11 pass closed three remaining Phase 4 gaps: the Electron/web-app AX fallback (hit-test at the last mouse-up point), real multi-monitor bubble/menu clamping (`CGDisplayBounds`-based), and click-outside-closes-menu parity with Windows. A 2026-07-11 Phase 5 pass implemented macOS dark mode support (`src/theme.css`, a `--rw-*` CSS custom-property system, wired into Settings/settingsComponents/Overlay/Processing/Bubble/BubbleMenu), and a same-day critical-review pass converted the previously-skipped `AccessibilityView.tsx` and fixed a Toggle on/off dark-mode contrast bug (new `--rw-toggle-off` token) — implementation-complete and builds cleanly, but not visually verified (no browser/screenshot capability in this environment). None of the macOS UI/input flows have been verified on a real packaged app/device. A 2026-07-12 pass closed the last unchecked `roadmap-mac.md` Phase 4 leaf, "Hide the bubble when: User switches apps" — a dedicated frontmost-app poll now clears the bubble on any app switch, not just as a side effect of the next click/keystroke probe. Built via two Sonnet subagents (implement, then independent critical review) with an Opus senior-dev pass on both ends; the review caught a real bug in the first implementation (comparing against reWrite's own pid instead of the source app's pid, which would have self-cleared the bubble almost immediately after every selection) before it reached a device. The original 2026-07-12 Phase 4C `AXManualAccessibility` attempt helped reachable Chromium/Electron elements but was live-proven insufficient for Chrome web content on 2026-07-14. A new code-reviewed bootstrap now targets Chrome's main application pid with `AXEnhancedUserInterface`, waits out Chromium's deliberate two-second activation debounce, and re-probes through application-scoped focus/hit-testing while retaining the editable-only gate; it compiles/tests cleanly but still needs the real Chrome verification documented in `roadmap-mac.md` Phase 4C.
 - This repository now uses `AGENTS.md` plus this file as the mandatory agent orientation path.
 
@@ -25,6 +26,15 @@ At minimum, update:
 - `Known Gaps` when new limitations are found or resolved.
 
 ## Recent Updates
+
+### 2026-07-15 (skills and history-metadata cloud sync)
+
+- Added `supabase/migrations/006_cloud_sync.sql`: per-user `user_skills` and append-only `rewrite_history` tables, authenticated-owner RLS, no prose columns, and an updated-at guard so a delayed older skills upsert cannot overwrite a newer edit.
+- `AuthSession` now carries the stable Supabase user UUID with backward-compatible deserialization. Login populates it from `/auth/v1/user`; legacy encrypted sessions are upgraded and re-persisted before their first sync. Token refresh preserves the UUID.
+- Added `src-tauri/src/sync.rs`, a best-effort PostgREST client/reconciler. History uses a dedicated metadata-only serialization type, paginated account-scoped pulls, union-by-id merge, blank local text for cloud-only rows, and replay of missing local metadata. Skills use a persisted logical edit timestamp for LWW, mirror only `default_skill_id` into `config.toml`, and reconcile independently of subscription sync. All rewrite/settings cloud pushes run only after successful local persistence and never block the user action.
+- Unified both rewrite history write paths through `history::append_and_sync`. Skills mutations, including default selection, now share serialized local persistence and fire-and-forget cloud pushes; deleting the active custom default falls back to `__proofread__`. Startup distinguishes legacy skills files from the new synced default field so crash recovery cannot roll a newer choice backward.
+- Settings renders metadata-only history without empty quotes and labels it "Text stays on the original device." `history:updated` and `skills:updated` listeners refresh dashboard totals, history, Skills, and the default-skill preference live, including view-local state.
+- Static verification on Windows: `cargo build --lib --bins`, `cargo test --lib --bins` (11 passed, including the no-prose payload regression test), `cargo clippy --lib --bins` (passes with 10 pre-existing warnings), `npx tsc --noEmit`, and the production `npm run build` all pass. Vite required an approved out-of-sandbox run so it could spawn its esbuild worker. Hosted migration/RLS and real two-device behavior remain unverified.
 
 ### 2026-07-14 (macOS Phase 4C — Chrome web-content AX bootstrap)
 
@@ -236,6 +246,7 @@ Main user flows:
 | `update.md` | Project update notes. |
 | `project.md` | Living project map and function index. |
 | `AGENTS.md` | Required operating instructions for future agents. |
+| `docs/cloud-sync-plan.md` | Product/privacy decisions, sync design, rollout order, and manual verification matrix for account cloud sync. |
 
 ### Frontend
 
@@ -251,7 +262,7 @@ Main user flows:
 | `src/pages/Processing.tsx` | Small processing/loading window and usage-limit variant. |
 | `src/pages/Bubble.tsx` | Clickable floating selection bubble. |
 | `src/pages/BubbleMenu.tsx` | Compact titles-only skill picker opened from the bubble. |
-| `src/pages/Settings.tsx` | Main settings app: home, history, skills, account/billing, preferences, Accessibility onboarding routing. |
+| `src/pages/Settings.tsx` | Main settings app: home, history (including cloud metadata-only rows), skills, account/billing, preferences, sync refresh listeners, Accessibility onboarding routing. |
 | `src/pages/AccessibilityView.tsx` | macOS Accessibility permission tutorial/recovery view: why it's needed, step-by-step checklist, open-Settings button, live granted/not-granted status, degraded-state messaging. |
 | `src/pages/settingsTypes.ts` | Settings-specific frontend types. |
 | `src/pages/settingsConstants.ts` | Settings constants such as app version, `ACCENT` (as of 2026-07-11 this is the string `"var(--rw-accent)"`, not a hex literal, so it follows `theme.css`'s dark-mode override automatically), and free limit. |
@@ -268,9 +279,10 @@ Main user flows:
 | `src-tauri/src/config.rs` | App config model, defaults, load/save. |
 | `src-tauri/src/clipboard.rs` | Selection capture, clipboard snapshot, paste, restore, HTML stripping, macOS Accessibility helpers. |
 | `src-tauri/src/rewrite.rs` | Calls Supabase rewrite Edge Function. |
-| `src-tauri/src/skills.rs` | Skill data model, built-in prompts, prompt composition. |
-| `src-tauri/src/history.rs` | Rewrite history model, word count, load/save. |
-| `src-tauri/src/auth.rs` | Supabase auth/session/subscription client helpers. |
+| `src-tauri/src/skills.rs` | Skill data model, synced default-skill field, logical LWW timestamp sidecar, built-in prompts, prompt composition. |
+| `src-tauri/src/history.rs` | Rewrite history model, word count, encrypted load/save, unified append-and-background-sync path. |
+| `src-tauri/src/auth.rs` | Supabase auth/session/subscription client helpers, including stable account UUID identity. |
+| `src-tauri/src/sync.rs` | Best-effort PostgREST history-metadata/skills push, pull, account reconciliation, and Tauri refresh events. |
 | `src-tauri/src/secure_store.rs` | Platform-specific encryption helpers for local secrets. |
 | `src-tauri/src/foreground.rs` | Detects whether foreground target should receive plain text or HTML. |
 | `src-tauri/src/esc_hook.rs` | System-wide Escape key dismissal for the overlay. Windows: low-level `WH_KEYBOARD_LL` keyboard hook. macOS: `CGEventTap`. |
@@ -285,6 +297,7 @@ Main user flows:
 | `supabase/migrations/001_profiles.sql` | Creates profiles and auth trigger. |
 | `supabase/migrations/002_usage_limits.sql` | Adds usage limit RPC work. |
 | `supabase/migrations/003_plan_tiers.sql` | Adds plan-tier support. |
+| `supabase/migrations/006_cloud_sync.sql` | Creates per-user skills and append-only history-metadata tables with RLS and stale-skills-write protection. |
 | `supabase/functions/rewrite/index.ts` | Authenticated rewrite Edge Function; enforces limits and calls Anthropic. |
 | `supabase/functions/sync-subscription/index.ts` | Syncs cached subscription state from Stripe. |
 | `supabase/functions/create-checkout-session/index.ts` | Creates Stripe Checkout sessions. |
@@ -316,7 +329,7 @@ These functions live in `src-tauri/src/commands.rs` and are exposed with `#[taur
 | `open_settings` | `commands.rs` | Shows/focuses the Settings window and hides overlay/bubble UI. |
 | `update_hotkey` | `commands.rs` | Updates config and re-registers the overlay global shortcut. |
 | `update_super_hotkey` | `commands.rs` | Updates config and re-registers the silent rewrite global shortcut. |
-| `set_default_skill` | `commands.rs` | Saves the default skill id in config. |
+| `set_default_skill` | `commands.rs` | Saves the default skill in the synced skills blob, mirrors it to config, then schedules a cloud push. |
 | `get_skills_config` | `commands.rs` | Returns the current skills config. |
 | `save_skills_config` | `commands.rs` | Persists the full skills config. |
 | `toggle_builtin_skill` | `commands.rs` | Enables/disables one built-in skill. |
@@ -380,6 +393,7 @@ These functions live in `src-tauri/src/commands.rs` and are exposed with `#[taur
 | `sync_subscription` | Calls Supabase `sync-subscription` and returns subscription cache. |
 | `send_magic_link` | Starts Supabase OTP magic-link login. |
 | `get_user_email` | Fetches the logged-in user's email from Supabase. |
+| `get_user` | Fetches the stable auth UUID and email used to populate/upgrade `AuthSession`. |
 | `create_checkout_url` | Calls Supabase checkout Edge Function. |
 | `create_portal_url` | Calls Supabase portal Edge Function. |
 | `parse_auth_url` | Parses a deep-link auth URL into tokens and expiry. |
@@ -403,6 +417,9 @@ These functions live in `src-tauri/src/commands.rs` and are exposed with `#[taur
 | `new_id` | Generates a unique skill/history id. |
 | `load` | Loads `skills.json`, falling back to defaults. |
 | `save` | Saves skills config. |
+| `file_has_default_skill_id` | Distinguishes legacy skills files from files where the synced default is authoritative. |
+| `load_updated_at_ms` / `save_updated_at_ms` | Reads/writes the logical skills LWW timestamp sidecar. |
+| `save_local_edit` | Persists a skills edit plus a fresh monotonic logical timestamp. |
 | `builtin_display_name` | Returns the display name for a built-in skill id. |
 | `skill_display_name` | Resolves display name for built-in or custom skill. |
 | `is_builtin_enabled` | Checks whether a built-in skill is enabled. |
@@ -424,6 +441,16 @@ These functions live in `src-tauri/src/commands.rs` and are exposed with `#[taur
 | `count_words` | Counts whitespace-separated words. |
 | `load` | Loads rewrite history from `history.json`. |
 | `save` | Saves rewrite history to `history.json`. |
+| `append_and_sync` | Appends/saves encrypted local history, then schedules metadata-only cloud push after success. |
+
+#### `src-tauri/src/sync.rs`
+
+| Function | What it does |
+|---|---|
+| `push_history_meta` / `pull_history_meta` | Sends or paginates account-scoped history metadata only; the wire type has no input/output text fields. |
+| `push_skills` / `pull_skills` | Upserts or reads the full per-user `SkillsConfig` with logical `updated_at`. |
+| `spawn_push_history` / `spawn_push_skills` | Runs best-effort local-write-following pushes without blocking rewrite/settings commands. |
+| `sync_all` | Reconciles history by immutable id and skills by updated-at, persists cloud wins, and emits live-refresh events. |
 
 #### `src-tauri/src/rewrite.rs`
 
@@ -567,6 +594,7 @@ Windows paths from `README.md`:
 
 - Config: `%APPDATA%\com.rewrite.app\config.toml`
 - Skills: `%APPDATA%\com.rewrite.app\skills.json`
+- Skills LWW timestamp: `%APPDATA%\com.rewrite.app\skills_updated_at_ms`
 - History: `%APPDATA%\com.rewrite.app\history.json`
 
 Important config defaults:
@@ -583,6 +611,8 @@ Important config defaults:
 | `bubble_enabled` | `true` |
 
 ## Known Gaps and Watch Points
+
+- **Cloud sync is code-complete but not yet release-verified.** Apply `006_cloud_sync.sql` to a development Supabase project, then run the two-account RLS isolation, two-device history/streak/word-total, skills LWW, offline replay, and database no-prose checks in `docs/cloud-sync-plan.md`. The current local `history.json`/`skills.json` cache remains machine-wide by product design; logout does not wipe it, so stricter per-account local partitioning remains a future product decision.
 
 - **macOS dark mode support (`src/theme.css` + all seven converted frontend files — Settings, settingsComponents, Overlay, Bubble, BubbleMenu, Processing, and now AccessibilityView — see the two 2026-07-11 "macOS dark mode" Recent Updates entries) is implementation-complete and compiles/builds cleanly, but is still UNVERIFIED VISUALLY — no browser or screenshot capability exists in the environment that built it.** Every color decision (which literal maps to which token, the dark-mode values chosen, the mid-dark-neutral accent tradeoff, the `--rw-toggle-off` contrast fix) was made by static reasoning against the existing light palette's relationships, not by looking at a rendered result. A human needs to: set macOS System Settings > Appearance to Dark, then open each of the five Phase-5-listed windows (Settings — all five internal views, including Accessibility, which a critical-review pass converted after the fact once it was pointed out that view auto-opens on first run and on any Accessibility revoke, not just as a rare manual visit; Overlay via the hotkey; Processing via a real rewrite and via hitting the free-tier limit for the red "limit" variant; Bubble by highlighting text; Bubble menu by clicking the bubble) and confirm text is legible, borders read against their surfaces, nothing shows as a stark white panel against the dark desktop, and the Selection-bubble/Launch-on-startup/Sound-on-rewrite toggles in Settings visibly show a different color for on vs off. Also confirm switching Appearance while the app is already running updates already-open windows live.
 - **Box-shadow elevation colors were deliberately left unconverted (documented, not an oversight) — a critical review flagged this as a real but low-severity/optional gap.** Cards, the Overlay panel, dropdowns, and the active sidebar nav item all use `rgba(20,20,26,...)`-family shadow colors for depth; against dark-mode surfaces those read as close to invisible, so those elements lose their sense of "lift" specifically in dark mode. Nothing is illegible or broken — converted borders still carry real visual separation between surfaces — this is a pure polish gap. Doing it properly would mean touching ~15+ box-shadow declarations across five files (most naturally via a new `--rw-shadow-rgb` RGB-triplet token referenced as `rgba(var(--rw-shadow-rgb), .16)`, with a distinctly lighter dark-mode value) for uncertain visual benefit, so it was left as future polish rather than attempted this pass.

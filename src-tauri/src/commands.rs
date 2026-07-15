@@ -7,13 +7,6 @@ fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
     m.lock().map_err(|e| e.to_string())
 }
 
-fn history_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|d| d.join("history.json"))
-        .map_err(|e| e.to_string())
-}
-
 fn log_history(
     app: &AppHandle,
     state: &AppState,
@@ -34,11 +27,8 @@ fn log_history(
         output_text: output_text.to_string(),
         output_word_count: crate::history::count_words(output_text),
     };
-    if let Ok(path) = history_path(app) {
-        if let Ok(mut h) = state.history.lock() {
-            h.entries.push(entry);
-            let _ = crate::history::save(&h, &path);
-        }
+    if let Err(error) = crate::history::append_and_sync(app, state, entry) {
+        crate::trace(&format!("history append failed: {error}"));
     }
 }
 
@@ -509,14 +499,26 @@ pub fn set_default_skill(
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let mut cfg = lock(&state.config)?;
-    cfg.default_skill_id = skill_id;
-    let path = app
+    let _write = lock(&state.skills_write_lock)?;
+    let config_path = app
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?
         .join("config.toml");
-    crate::config::save(&*cfg, &path).map_err(|e| e.to_string())?;
+    let skills_path = skills_path(&app)?;
+    let mut cfg = lock(&state.config)?.clone();
+    let mut skills = lock(&state.skills_config)?.clone();
+    cfg.default_skill_id = skill_id.clone();
+    skills.default_skill_id = skill_id;
+    let updated_at_ms =
+        crate::skills::save_local_edit(&skills, &skills_path).map_err(|e| e.to_string())?;
+    // skills.json is authoritative once it has the synced field. Persist it
+    // before the compatibility mirror so startup can repair config.toml after
+    // a crash between these writes without rolling the new choice back.
+    crate::config::save(&cfg, &config_path).map_err(|e| e.to_string())?;
+    *lock(&state.config)? = cfg;
+    *lock(&state.skills_config)? = skills.clone();
+    crate::sync::spawn_push_skills(app, skills, updated_at_ms);
     Ok(())
 }
 
@@ -527,6 +529,33 @@ fn skills_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .app_config_dir()
         .map(|d| d.join("skills.json"))
         .map_err(|e| e.to_string())
+}
+
+fn persist_skills_change(
+    app: &AppHandle,
+    state: &AppState,
+    config: crate::skills::SkillsConfig,
+) -> Result<(), String> {
+    let path = skills_path(app)?;
+    let mut app_config = lock(&state.config)?.clone();
+    let default_changed = app_config.default_skill_id != config.default_skill_id;
+    let updated_at_ms =
+        crate::skills::save_local_edit(&config, &path).map_err(|e| e.to_string())?;
+    if default_changed {
+        app_config.default_skill_id = config.default_skill_id.clone();
+        let config_path = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())?
+            .join("config.toml");
+        crate::config::save(&app_config, &config_path).map_err(|e| e.to_string())?;
+    }
+    if default_changed {
+        *lock(&state.config)? = app_config;
+    }
+    *lock(&state.skills_config)? = config.clone();
+    crate::sync::spawn_push_skills(app.clone(), config, updated_at_ms);
+    Ok(())
 }
 
 #[tauri::command]
@@ -540,10 +569,8 @@ pub fn save_skills_config(
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let path = skills_path(&app)?;
-    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
-    *lock(&state.skills_config)? = config;
-    Ok(())
+    let _write = lock(&state.skills_write_lock)?;
+    persist_skills_change(&app, &state, config)
 }
 
 #[tauri::command]
@@ -553,12 +580,10 @@ pub fn toggle_builtin_skill(
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let _write = lock(&state.skills_write_lock)?;
     let mut config = lock(&state.skills_config)?.clone();
     config.builtin_enabled.insert(id, enabled);
-    let path = skills_path(&app)?;
-    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
-    *lock(&state.skills_config)? = config;
-    Ok(())
+    persist_skills_change(&app, &state, config)
 }
 
 #[tauri::command]
@@ -569,6 +594,7 @@ pub fn create_skill(
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<crate::skills::Skill, String> {
+    let _write = lock(&state.skills_write_lock)?;
     let mut config = lock(&state.skills_config)?.clone();
     let order = config.skills.len() as i32;
     let skill = crate::skills::Skill {
@@ -580,23 +606,22 @@ pub fn create_skill(
         base_skill_id,
     };
     config.skills.push(skill.clone());
-    let path = skills_path(&app)?;
-    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
-    *lock(&state.skills_config)? = config;
+    persist_skills_change(&app, &state, config)?;
     Ok(skill)
 }
 
 #[tauri::command]
 pub fn delete_skill(id: String, state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let _write = lock(&state.skills_write_lock)?;
     let mut config = lock(&state.skills_config)?.clone();
     config.skills.retain(|s| s.id != id);
     for (i, s) in config.skills.iter_mut().enumerate() {
         s.order = i as i32;
     }
-    let path = skills_path(&app)?;
-    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
-    *lock(&state.skills_config)? = config;
-    Ok(())
+    if config.default_skill_id == id {
+        config.default_skill_id = "__proofread__".to_string();
+    }
+    persist_skills_change(&app, &state, config)
 }
 
 #[tauri::command]
@@ -605,6 +630,7 @@ pub fn reorder_skills(
     state: State<AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let _write = lock(&state.skills_write_lock)?;
     let mut config = lock(&state.skills_config)?.clone();
     let mut reordered: Vec<crate::skills::Skill> = Vec::with_capacity(ids.len());
     for (i, id) in ids.iter().enumerate() {
@@ -621,10 +647,7 @@ pub fn reorder_skills(
         }
     }
     config.skills = reordered;
-    let path = skills_path(&app)?;
-    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
-    *lock(&state.skills_config)? = config;
-    Ok(())
+    persist_skills_change(&app, &state, config)
 }
 
 // ── History commands ──────────────────────────────────────────────────────────

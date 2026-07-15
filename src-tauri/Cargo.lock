@@ -3465,6 +3465,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "arboard",
+ "chrono",
  "enigo",
  "keyring",
  "objc2 0.5.2",

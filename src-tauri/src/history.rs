@@ -5,6 +5,7 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -62,5 +63,26 @@ pub fn save(store: &HistoryStore, path: &Path) -> Result<()> {
     let json = serde_json::to_vec_pretty(store)?;
     let cipher = crate::secure_store::encrypt(&json)?;
     fs::write(path, cipher)?;
+    Ok(())
+}
+
+/// The single append path for every rewrite surface. Local encrypted storage
+/// commits first; cloud metadata is then sent fire-and-forget only when that
+/// write succeeded, so sync can never delay or break a rewrite.
+pub fn append_and_sync(
+    app: &AppHandle,
+    state: &crate::AppState,
+    entry: HistoryEntry,
+) -> Result<()> {
+    let path = app.path().app_config_dir()?.join("history.json");
+    {
+        let mut history = state
+            .history
+            .lock()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        history.entries.push(entry.clone());
+        save(&history, &path)?;
+    }
+    crate::sync::spawn_push_history(app.clone(), entry);
     Ok(())
 }
