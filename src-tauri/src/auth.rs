@@ -23,6 +23,8 @@ pub struct AuthSession {
     pub refresh_token: String,
     pub expires_at: i64,
     pub email: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -154,6 +156,7 @@ pub async fn refresh_session(
         refresh_token: r.refresh_token,
         expires_at,
         email: session.email,
+        name: session.name,
     })
 }
 
@@ -231,10 +234,26 @@ pub fn google_login_url() -> String {
 
 // ── User info ─────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize, Default)]
+struct UserMetadata {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct AuthUser {
     pub id: String,
     pub email: Option<String>,
+    user_metadata: Option<UserMetadata>,
+}
+
+impl AuthUser {
+    pub fn display_name(&self) -> String {
+        self.user_metadata
+            .as_ref()
+            .and_then(|m| m.display_name.clone())
+            .unwrap_or_default()
+    }
 }
 
 pub async fn get_user(client: &reqwest::Client, access_token: &str) -> Result<AuthUser> {
@@ -255,6 +274,28 @@ pub async fn get_user(client: &reqwest::Client, access_token: &str) -> Result<Au
         return Err(anyhow!("No id in user response"));
     }
     Ok(user)
+}
+
+pub async fn set_display_name(
+    client: &reqwest::Client,
+    access_token: &str,
+    name: &str,
+) -> Result<()> {
+    let resp = client
+        .put(format!("{SUPABASE_URL}/auth/v1/user"))
+        .header("apikey", SUPABASE_ANON_KEY)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "data": { "display_name": name } }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("Set display name failed: {text}"));
+    }
+
+    Ok(())
 }
 
 pub async fn get_user_email(client: &reqwest::Client, access_token: &str) -> Result<String> {

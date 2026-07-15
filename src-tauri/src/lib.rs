@@ -393,15 +393,15 @@ mod mac_display {
     //!
     //! Uses full display bounds (`CGDisplayBounds`), not a "work area" that
     //! excludes the menu bar/dock — `CoreGraphics` has no direct equivalent of
-    //! Win32's `GetMonitorInfoW` work-area rect; the AppKit equivalent
-    //! (`NSScreen.visibleFrame`) is a main-thread-only AppKit call, which would
-    //! need marshaling this is intentionally avoiding since bubble/menu
-    //! positioning already runs on the main thread via `run_on_main_thread`
-    //! elsewhere in this file, and pulling in an extra main-thread round trip
-    //! just for the visible-frame variant isn't worth it for a small floating
-    //! bubble that just needs to stay on-screen. Documented as a known
-    //! limitation: a bubble positioned very close to the menu bar/dock could
-    //! still overlap it slightly.
+    //! Win32's `GetMonitorInfoW` work-area rect. This is still fine for
+    //! `show_bubble`'s clamp, which just needs to keep the small bubble dot
+    //! from hanging off the edge of the screen. `show_bubble_menu`, however,
+    //! needs the real visible frame so the menu never gets clamped behind the
+    //! Dock — see `work_area_containing` below, which calls AppKit's
+    //! `NSScreen.visibleFrame` instead. That's a main-thread-only AppKit call,
+    //! but bubble/menu positioning already runs on the main thread via
+    //! `run_on_main_thread` elsewhere in this file, so no extra marshaling is
+    //! needed.
     type CGDirectDisplayID = u32;
     type CGError = i32;
 
@@ -477,6 +477,51 @@ mod mac_display {
         }
     }
 
+    /// The visible work area (excludes the menu bar and Dock) of the display
+    /// containing `(x, y)`, converted to the same top-left-origin Quartz space
+    /// as `display_bounds_containing`/`CGDisplayBounds` above. Unlike that
+    /// function, there's no `CoreGraphics` equivalent of a work-area rect, so
+    /// this goes through AppKit's `NSScreen.visibleFrame` instead — safe to
+    /// call here since `show_bubble_menu` (the only caller) already runs on
+    /// the main thread via `run_on_main_thread`.
+    ///
+    /// AppKit rects are bottom-left-origin ("flipped" relative to Quartz), so
+    /// each rect is converted using the primary screen's height `H` (screen
+    /// index 0, whose frame origin is always `(0, 0)`): a rect
+    /// `(ox, oy, rw, rh)` becomes `(ox, H - (oy + rh), ox + rw, H - oy)`.
+    ///
+    /// `None` if `MainThreadMarker::new()` fails (not actually on the main
+    /// thread) or no screens are reported — callers should fall back to
+    /// `display_bounds_containing`'s clamp behavior in that case.
+    pub(super) fn work_area_containing(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+        use objc2_app_kit::NSScreen;
+        use objc2_foundation::{MainThreadMarker, NSRect};
+
+        // SAFETY: the only caller, `show_bubble_menu`, runs this closure inside
+        // `run_on_main_thread`, so we are guaranteed to be on the main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let screens = NSScreen::screens(mtm);
+        // SAFETY: `screens` is AppKit's own array of `NSScreen`, so every
+        // element is a valid `NSScreen`; the generic array accessors are only
+        // `unsafe` because the element type isn't statically proven.
+        let primary_h = unsafe { screens.firstObject() }?.frame().size.height;
+
+        let quartz = |r: NSRect| -> (f64, f64, f64, f64) {
+            let (ox, oy, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+            (ox, primary_h - (oy + h), ox + w, primary_h - oy)
+        };
+
+        let screen = (0..screens.count())
+            .map(|i| unsafe { screens.objectAtIndex(i) })
+            .find(|s| {
+                let (l, t, r, b) = quartz(s.frame());
+                x >= l && x < r && y >= t && y < b
+            })
+            .or_else(|| NSScreen::mainScreen(mtm))?;
+
+        Some(quartz(screen.visibleFrame()))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -542,6 +587,44 @@ mod mac_display {
     }
 }
 
+/// `GetMonitorInfoW`'s `rcWork` rect (physical pixels) for the monitor
+/// containing `(x, y)`, already excluding the taskbar — factored out of
+/// `clamp_rect_to_monitor`'s Windows branch so `show_bubble_menu` can also use
+/// it via `work_area_containing_point` below. `None` if no monitor info is
+/// available, same "fall back to the raw point" policy as the caller.
+#[cfg(target_os = "windows")]
+fn win_work_area_containing(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let pt = POINT {
+        x: x as i32,
+        y: y as i32,
+    };
+    let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }
+        .ok()
+        .is_err()
+    {
+        return None;
+    }
+
+    let work = info.rcWork;
+    Some((
+        work.left as f64,
+        work.top as f64,
+        work.right as f64,
+        work.bottom as f64,
+    ))
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
     #[cfg(target_os = "macos")]
@@ -557,66 +640,97 @@ fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
 
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-
-        let pt = POINT {
-            x: x as i32,
-            y: y as i32,
-        };
-        let hmonitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if unsafe { GetMonitorInfoW(hmonitor, &mut info) }
-            .ok()
-            .is_err()
-        {
-            // No monitor info available — fall back to the raw, unclamped point
-            // rather than guessing.
+        let Some((left, top, right, bottom)) = win_work_area_containing(x, y) else {
+            // No monitor info available — fall back to the raw, unclamped
+            // point rather than guessing.
             return (x, y);
-        }
-
-        let work = info.rcWork;
-        let min_x = work.left as f64;
-        let max_x = (work.right as f64 - w).max(min_x);
-        let min_y = work.top as f64;
-        let max_y = (work.bottom as f64 - h).max(min_y);
+        };
+        let min_x = left;
+        let max_x = (right - w).max(min_x);
+        let min_y = top;
+        let max_y = (bottom - h).max(min_y);
 
         (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
     }
 }
 
+/// Places a `w`x`h` menu relative to anchor `(ax, ay)` inside work area
+/// `(left, top, right, bottom)`. Prefers below-right of the anchor; flips
+/// above when it would overflow the bottom, and left when it would overflow
+/// the right. Falls back to clamping when neither side fits.
+fn place_menu(ax: f64, ay: f64, w: f64, h: f64, work: (f64, f64, f64, f64)) -> (f64, f64) {
+    const GAP: f64 = 8.0;
+    let (left, top, right, bottom) = work;
+    let x = if ax + GAP + w <= right { ax + GAP } else { ax - w };
+    let y = if ay + GAP + h <= bottom { ay + GAP } else { ay - h };
+    let max_x = (right - w).max(left);
+    let max_y = (bottom - h).max(top);
+    (x.clamp(left, max_x), y.clamp(top, max_y))
+}
+
+#[cfg(test)]
+mod place_menu_tests {
+    use super::*;
+
+    const WORK: (f64, f64, f64, f64) = (0.0, 0.0, 1920.0, 1080.0 - 60.0); // Dock excluded
+
+    #[test]
+    fn fits_below_right_unchanged() {
+        // Plenty of room below and to the right of the anchor: no flip.
+        assert_eq!(
+            place_menu(500.0, 300.0, 168.0, 180.0, WORK),
+            (500.0 + 8.0, 300.0 + 8.0)
+        );
+    }
+
+    #[test]
+    fn flips_above_near_bottom() {
+        // Anchor close to the bottom of the work area (not the full display)
+        // — the menu must flip to appear above the anchor, not get clamped
+        // under the Dock.
+        let (_, _, _, bottom) = WORK;
+        let ay = bottom - 20.0;
+        let (_, y) = place_menu(500.0, ay, 168.0, 180.0, WORK);
+        assert_eq!(y, ay - 180.0);
+        assert!(y + 180.0 <= bottom, "menu must stay within the work area");
+    }
+
+    #[test]
+    fn flips_left_near_right_edge() {
+        // Anchor close to the right edge — the menu must flip to the left of
+        // the anchor rather than clamp/overlap it.
+        let (_, _, right, _) = WORK;
+        let ax = right - 20.0;
+        let (x, _) = place_menu(ax, 300.0, 168.0, 180.0, WORK);
+        assert_eq!(x, ax - 168.0);
+        assert!(x + 168.0 <= right, "menu must stay within the work area");
+    }
+}
+
+/// A window's outer size converted to the unit the platform's monitor/work-
+/// area math expects: logical points on macOS (matching `CGDisplayBounds`/
+/// `NSScreen` and the incoming points-space `x, y`), physical pixels on
+/// Windows (matching `GetMonitorInfoW`). Factored out of `clamp_to_monitor` so
+/// `show_bubble_menu` can also feed a window's real size into `place_menu`.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn clamp_to_monitor(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
+fn menu_logical_size(window: &WebviewWindow) -> (f64, f64) {
     #[cfg(target_os = "macos")]
     {
-        // Unit consistency, not just at the final `set_position` call: `x, y`
-        // here (and the `CGDisplayBounds` values `clamp_rect_to_monitor`'s
-        // macOS branch compares them against) are in points — the same unit
-        // Cocoa/Quartz uses everywhere on macOS, which is exactly what Tauri
-        // calls "logical" pixels there (NOT "physical", which is
-        // points * backingScaleFactor). `window.outer_size()` returns
-        // Tauri's `PhysicalSize` (device pixels) regardless of platform, so
-        // using it here directly would mix pixel-space `w`/`h` into a
-        // point-space clamp — on any Retina display (scale factor 2, the
-        // overwhelming majority of real Macs) that over-subtracts near the
-        // display's right/bottom edge by roughly 2x the window's true
-        // point-space size. Convert to logical/points via the window's own
-        // scale factor before handing off to the shared clamp math.
+        // `window.outer_size()` returns Tauri's `PhysicalSize` (device
+        // pixels) regardless of platform, so using it directly here would mix
+        // pixel-space `w`/`h` into a point-space clamp — on any Retina
+        // display (scale factor 2, the overwhelming majority of real Macs)
+        // that over-subtracts near the display's right/bottom edge by
+        // roughly 2x the window's true point-space size. Convert to
+        // logical/points via the window's own scale factor first.
         let scale = window.scale_factor().unwrap_or(1.0);
-        let (w, h) = window
+        return window
             .outer_size()
             .map(|s| {
                 let logical = s.to_logical::<f64>(scale);
                 (logical.width, logical.height)
             })
             .unwrap_or((0.0, 0.0));
-        return clamp_rect_to_monitor(x, y, w, h);
     }
 
     #[cfg(target_os = "windows")]
@@ -624,12 +738,22 @@ fn clamp_to_monitor(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
         // Windows: UIA selection rects and `GetWindowRect`/monitor info are
         // already all in physical pixels, matching `outer_size()` directly —
         // no conversion needed here.
-        let (w, h) = window
+        window
             .outer_size()
             .map(|s| (s.width as f64, s.height as f64))
-            .unwrap_or((0.0, 0.0));
-        clamp_rect_to_monitor(x, y, w, h)
+            .unwrap_or((0.0, 0.0))
     }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn menu_logical_size(_window: &WebviewWindow) -> (f64, f64) {
+    (0.0, 0.0)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn clamp_to_monitor(window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
+    let (w, h) = menu_logical_size(window);
+    clamp_rect_to_monitor(x, y, w, h)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -640,6 +764,30 @@ fn clamp_rect_to_monitor(x: f64, y: f64, _w: f64, _h: f64) -> (f64, f64) {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn clamp_to_monitor(_window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
     (x, y)
+}
+
+/// The visible work area (excluding the Dock/taskbar and menu bar) containing
+/// `(x, y)`, in the same per-platform coordinate space `clamp_to_monitor`
+/// uses — see `mac_display::work_area_containing` and
+/// `win_work_area_containing`. `None` on platforms without an implementation,
+/// or if the underlying lookup fails, so callers can fall back to
+/// `clamp_to_monitor`'s plain-clamp behavior.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn work_area_containing_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        return mac_display::work_area_containing(x, y);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        win_work_area_containing(x, y)
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn work_area_containing_point(_x: f64, _y: f64) -> Option<(f64, f64, f64, f64)> {
+    None
 }
 
 /// Show the selection bubble near `(x, y)` (physical screen coordinates from
@@ -749,20 +897,30 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
 
         if let Some(w) = handle.get_webview_window("bubble_menu") {
             let _ = w.set_size(LogicalSize::new(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT));
-            // Clamp using the window's own `outer_size()` (via
-            // `clamp_to_monitor`) rather than the logical BUBBLE_MENU_WIDTH/
-            // HEIGHT constants directly. On Windows, `clamp_rect_to_monitor`
+            // Size using the window's own `outer_size()` (via
+            // `menu_logical_size`) rather than the logical BUBBLE_MENU_WIDTH/
+            // HEIGHT constants directly. On Windows, the work-area math below
             // subtracts w/h from `rcWork`, which `GetMonitorInfoW` reports in
             // *physical* pixels — feeding it the logical constants there
             // under-subtracts by the monitor's scale factor on any HiDPI
             // display, letting the menu hang off the right/bottom edge.
-            // `clamp_to_monitor` reads `outer_size()`, which is already in
+            // `menu_logical_size` reads `outer_size()`, which is already in
             // physical pixels on Windows (no conversion needed) and is
-            // converted to points on macOS (matching `CGDisplayBounds` and
-            // the incoming points-space `x, y`) — see its doc comment. The
-            // `set_size` call above runs first so `outer_size()` reflects the
-            // menu's real dimensions before the clamp reads it.
-            let (x, y) = clamp_to_monitor(&w, x + 8.0, y + 8.0);
+            // converted to points on macOS (matching `CGDisplayBounds`/
+            // `NSScreen` and the incoming points-space `x, y`) — see its doc
+            // comment. The `set_size` call above runs first so `outer_size()`
+            // reflects the menu's real dimensions before this reads it.
+            //
+            // Prefer the real visible-work-area lookup (excludes the Dock/
+            // menu bar/taskbar) so the menu can flip above/left of the anchor
+            // instead of getting clamped behind the Dock near screen edges —
+            // see `place_menu`'s doc comment. Only fall back to the plain
+            // clamp-to-full-display behavior if that lookup fails.
+            let (menu_w, menu_h) = menu_logical_size(&w);
+            let (x, y) = match work_area_containing_point(x, y) {
+                Some(work) => place_menu(x, y, menu_w, menu_h, work),
+                None => clamp_to_monitor(&w, x + 8.0, y + 8.0),
+            };
             // Same points-vs-physical-pixels distinction as `show_bubble` —
             // see that call site's comment.
             #[cfg(target_os = "macos")]
@@ -976,6 +1134,31 @@ pub(crate) fn persist_subscription(app: &AppHandle, sub: &auth::SubscriptionCach
     }
 }
 
+static LAST_OPEN_SYNC_MS: AtomicU64 = AtomicU64::new(0);
+const OPEN_SYNC_THROTTLE_MS: u64 = 20_000;
+
+/// Best-effort cloud pull when the dashboard is opened, so an already-running
+/// app reflects skill/history edits made on other devices without a restart
+/// (startup sync alone would leave it stale until relaunch). Throttled, and a
+/// no-op when logged out. `sync_all` emits `skills:updated`/`history:updated`,
+/// which the frontend already listens for and re-reads on.
+fn sync_on_open(app: &AppHandle) {
+    let logged_in = app
+        .try_state::<AppState>()
+        .is_some_and(|s| s.auth_session.lock().unwrap().is_some());
+    let now = now_ms();
+    if !logged_in || now.saturating_sub(LAST_OPEN_SYNC_MS.load(Ordering::SeqCst)) < OPEN_SYNC_THROTTLE_MS {
+        return;
+    }
+    LAST_OPEN_SYNC_MS.store(now, Ordering::SeqCst);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = sync::sync_all(&app).await {
+            trace(&format!("cloud sync on open failed: {error}"));
+        }
+    });
+}
+
 pub fn show_settings(app: &AppHandle) {
     // The Settings window is pre-warmed (hidden) at startup, so opening it is
     // just a show + focus — we never build a webview at runtime here. Building
@@ -983,6 +1166,7 @@ pub fn show_settings(app: &AppHandle) {
     // main event loop (the new window paints blank and the app freezes), so the
     // window must already exist. The build path below is only a safety net for
     // the unlikely case that pre-warming failed.
+    sync_on_open(app);
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -1096,6 +1280,7 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
             access_token: access_token.clone(),
             refresh_token,
             expires_at,
+            name: user.as_ref().map(|u| u.display_name()).unwrap_or_default(),
             email: user.and_then(|u| u.email).unwrap_or_default(),
         };
 
@@ -1984,6 +2169,7 @@ pub fn run() {
             commands::open_checkout,
             commands::open_billing_portal,
             commands::refresh_subscription,
+            commands::set_display_name,
             commands::bubble_clicked,
             commands::close_bubble_menu,
             commands::debug_trace,

@@ -9,14 +9,14 @@ import { BUILTIN_SKILLS } from "../skills";
 import logoBlack from "../assets/rewrite_logo_black.png";
 import type { ActiveView, AuthState } from "./settingsTypes";
 import { ACCENT, BUILTIN_SKILL_OPTIONS, FREE_TIER_MONTHLY_LIMIT } from "./settingsConstants";
-import { IconLock, Sidebar, Toggle } from "./settingsComponents";
+import { IconLock, IconPencil, Sidebar, Toggle } from "./settingsComponents";
 import { AccessibilityView } from "./AccessibilityView";
 import {
   computeActivityHeatmap,
   computeSkillUsage,
   computeStreak,
   computeWordStats,
-  firstNameFromEmail,
+  displayName,
   formatHoursSaved,
   formatRenewalDate,
   formatTime,
@@ -168,7 +168,7 @@ function HomeView({ history, config, authState, accessibilityGranted, isMacos, o
     <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both" }}>
       <header style={{ marginBottom: 34 }}>
         <h1 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontSize: 50, lineHeight: 1.02, color: "var(--rw-text-primary)", letterSpacing: -.5 }}>
-          {greet}, {firstNameFromEmail(authState.email)}
+          {greet}, {displayName(authState)}
         </h1>
         <p style={{ fontSize: 16, color: "var(--rw-text-muted)", marginTop: 10 }}>Let's knock something off your to-do list.</p>
       </header>
@@ -741,6 +741,11 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
   const [hotkeySaving, setHotkeySaving] = useState(false);
 
+  const [editingName, setEditingName] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [nameSaving, setNameSaving] = useState(false);
+
   const [editingSuperHotkey, setEditingSuperHotkey] = useState(false);
   const [newSuperHotkey, setNewSuperHotkey] = useState("");
   const [superHotkeyError, setSuperHotkeyError] = useState<string | null>(null);
@@ -764,6 +769,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
 
   const newHotkeyRef = useRef<HTMLInputElement>(null);
   const newSuperHotkeyRef = useRef<HTMLInputElement>(null);
+  const newNameRef = useRef<HTMLInputElement>(null);
 
   const loadPreferences = useCallback(() => {
     invoke<Config>("get_config").then((cfg) => {
@@ -804,6 +810,24 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
 
   useEffect(() => { if (editingHotkey) newHotkeyRef.current?.focus(); }, [editingHotkey]);
   useEffect(() => { if (editingSuperHotkey) newSuperHotkeyRef.current?.focus(); }, [editingSuperHotkey]);
+  useEffect(() => { if (editingName) newNameRef.current?.focus(); }, [editingName]);
+
+  async function handleSaveName(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    setNameSaving(true);
+    setNameError(null);
+    try {
+      await invoke("set_display_name", { name: trimmed });
+      setEditingName(false);
+      setNewName("");
+    } catch (err) {
+      setNameError(String(err));
+    } finally {
+      setNameSaving(false);
+    }
+  }
 
   async function handleSaveHotkey(e: React.FormEvent) {
     e.preventDefault();
@@ -896,8 +920,25 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
             {initialsFromEmail(authState.email)}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 17, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{firstNameFromEmail(authState.email)}</div>
-            <div style={{ fontSize: 13.5, color: "var(--rw-text-muted)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
+            {editingName ? (
+              <form onSubmit={handleSaveName} style={{ display: "flex", gap: 8 }}>
+                <input ref={newNameRef} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={displayName(authState)} style={{ flex: 1, border: "1px solid var(--rw-border)", borderRadius: 9, padding: "8px 12px", fontSize: 14, color: "var(--rw-text-primary)", outline: "none", fontFamily: "inherit" }} />
+                <button type="submit" disabled={!newName.trim() || nameSaving} style={{ fontSize: 13, fontWeight: 600, color: "var(--rw-on-accent)", background: "var(--rw-accent)", border: "none", borderRadius: 9, padding: "8px 14px", cursor: "pointer", fontFamily: "inherit" }}>{nameSaving ? "…" : "Save"}</button>
+                <button type="button" onClick={() => { setEditingName(false); setNameError(null); setNewName(""); }} style={{ fontSize: 13, color: "var(--rw-text-muted)", background: "var(--rw-bg-subtle)", border: "1px solid var(--rw-border)", borderRadius: 9, padding: "8px 12px", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              </form>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ fontSize: 17, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName(authState)}</div>
+                <button
+                  onClick={() => { setEditingName(true); setNewName(displayName(authState)); }}
+                  title="Edit name"
+                  style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, flexShrink: 0, border: "none", background: "transparent", color: "var(--rw-text-faint)", cursor: "pointer", padding: 0 }}
+                >
+                  <IconPencil />
+                </button>
+              </div>
+            )}
+            {nameError && <div style={{ fontSize: 12, color: "var(--rw-danger)", marginTop: 5 }}>{nameError}</div>}
           </div>
           <button
             onClick={async () => { await invoke("logout"); onLogout(); }}
