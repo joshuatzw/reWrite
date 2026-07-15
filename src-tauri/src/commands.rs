@@ -500,26 +500,9 @@ pub fn set_default_skill(
     app: AppHandle,
 ) -> Result<(), String> {
     let _write = lock(&state.skills_write_lock)?;
-    let config_path = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?
-        .join("config.toml");
-    let skills_path = skills_path(&app)?;
-    let mut cfg = lock(&state.config)?.clone();
-    let mut skills = lock(&state.skills_config)?.clone();
-    cfg.default_skill_id = skill_id.clone();
-    skills.default_skill_id = skill_id;
-    let updated_at_ms =
-        crate::skills::save_local_edit(&skills, &skills_path).map_err(|e| e.to_string())?;
-    // skills.json is authoritative once it has the synced field. Persist it
-    // before the compatibility mirror so startup can repair config.toml after
-    // a crash between these writes without rolling the new choice back.
-    crate::config::save(&cfg, &config_path).map_err(|e| e.to_string())?;
-    *lock(&state.config)? = cfg;
-    *lock(&state.skills_config)? = skills.clone();
-    crate::sync::spawn_push_skills(app, skills, updated_at_ms);
-    Ok(())
+    let mut config = lock(&state.skills_config)?.clone();
+    config.default_skill_id = skill_id;
+    persist_skills_change(&app, &state, config)
 }
 
 // ── Skills commands ───────────────────────────────────────────────────────────
@@ -531,30 +514,114 @@ fn skills_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|e| e.to_string())
 }
 
+/// For each skill in `next`, keep the previous `updated_at_ms` if the skill
+/// is unchanged from `prev`; otherwise (new or edited) stamp it `now`.
+/// Backend-authoritative: any timestamp the frontend sent is overwritten.
+fn stamp_skills(prev: &[crate::skills::Skill], next: &mut [crate::skills::Skill], now: i64) {
+    for skill in next.iter_mut() {
+        skill.updated_at_ms = match prev.iter().find(|p| p.id == skill.id) {
+            Some(p)
+                if p.name == skill.name
+                    && p.instructions == skill.instructions
+                    && p.enabled == skill.enabled
+                    && p.order == skill.order
+                    && p.base_skill_id == skill.base_skill_id =>
+            {
+                p.updated_at_ms
+            }
+            _ => now,
+        };
+    }
+}
+
+/// Tombstone every id present in `prev` but dropped from `next`.
+fn collect_deletions(
+    prev: &[crate::skills::Skill],
+    next: &[crate::skills::Skill],
+    now: i64,
+    tombstones: &mut std::collections::HashMap<String, i64>,
+) {
+    for skill in prev {
+        if !next.iter().any(|s| s.id == skill.id) {
+            tombstones.insert(skill.id.clone(), now);
+        }
+    }
+}
+
+/// True if any of the LWW-merged scalar fields changed.
+fn scalar_changed(prev: &crate::skills::SkillsConfig, next: &crate::skills::SkillsConfig) -> bool {
+    prev.global_instructions != next.global_instructions
+        || prev.builtin_enabled != next.builtin_enabled
+        || prev.default_skill_id != next.default_skill_id
+}
+
+/// Unions `prev`'s tombstones with newly-deleted ids, then drops any id that
+/// survived as a live skill in `next` (a live skill must not be shadowed by
+/// a stale tombstone).
+fn build_tombstones(
+    prev: &crate::skills::SkillsConfig,
+    next: &[crate::skills::Skill],
+    now: i64,
+) -> std::collections::HashMap<String, i64> {
+    let mut tombstones = prev.deleted_skills.clone();
+    collect_deletions(&prev.skills, next, now, &mut tombstones);
+    for skill in next {
+        tombstones.remove(&skill.id);
+    }
+    tombstones
+}
+
+/// Mirrors `default_skill_id` into config.toml + in-memory app config.
+/// Shared by the local-edit and sync-reconcile paths so both keep the
+/// compatibility mirror consistent with skills.json.
+pub(crate) fn mirror_default_skill(
+    app: &AppHandle,
+    state: &AppState,
+    config: &crate::skills::SkillsConfig,
+) -> Result<(), String> {
+    let mut app_config = lock(&state.config)?.clone();
+    if app_config.default_skill_id == config.default_skill_id {
+        return Ok(());
+    }
+    app_config.default_skill_id = config.default_skill_id.clone();
+    let config_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("config.toml");
+    crate::config::save(&app_config, &config_path).map_err(|e| e.to_string())?;
+    *lock(&state.config)? = app_config;
+    Ok(())
+}
+
+/// Single choke point for local skill edits: stamps logical edit times by
+/// diffing against the previous in-memory config (the backend, not the
+/// frontend, is authoritative for timestamps), persists, then pull-merge-
+/// pushes to the cloud so a local edit can never clobber another device.
 fn persist_skills_change(
     app: &AppHandle,
     state: &AppState,
-    config: crate::skills::SkillsConfig,
+    mut config: crate::skills::SkillsConfig,
 ) -> Result<(), String> {
+    let prev = lock(&state.skills_config)?.clone();
+    let now = crate::history::now_ms();
+
+    stamp_skills(&prev.skills, &mut config.skills, now);
+    config.deleted_skills = build_tombstones(&prev, &config.skills, now);
+    config.scalar_updated_at_ms = if scalar_changed(&prev, &config) {
+        now
+    } else {
+        prev.scalar_updated_at_ms
+    };
+
+    // skills.json is authoritative once saved; the config.toml mirror is
+    // written second so startup can repair it after a crash between writes.
     let path = skills_path(app)?;
-    let mut app_config = lock(&state.config)?.clone();
-    let default_changed = app_config.default_skill_id != config.default_skill_id;
-    let updated_at_ms =
-        crate::skills::save_local_edit(&config, &path).map_err(|e| e.to_string())?;
-    if default_changed {
-        app_config.default_skill_id = config.default_skill_id.clone();
-        let config_path = app
-            .path()
-            .app_config_dir()
-            .map_err(|e| e.to_string())?
-            .join("config.toml");
-        crate::config::save(&app_config, &config_path).map_err(|e| e.to_string())?;
-    }
-    if default_changed {
-        *lock(&state.config)? = app_config;
-    }
+    crate::skills::save(&config, &path).map_err(|e| e.to_string())?;
+    mirror_default_skill(app, state, &config)?;
+
     *lock(&state.skills_config)? = config.clone();
-    crate::sync::spawn_push_skills(app.clone(), config, updated_at_ms);
+    crate::sync::spawn_push_skills(app.clone());
     Ok(())
 }
 
@@ -597,17 +664,23 @@ pub fn create_skill(
     let _write = lock(&state.skills_write_lock)?;
     let mut config = lock(&state.skills_config)?.clone();
     let order = config.skills.len() as i32;
-    let skill = crate::skills::Skill {
-        id: crate::skills::new_id(),
+    let id = crate::skills::new_id();
+    config.skills.push(crate::skills::Skill {
+        id: id.clone(),
         name,
         instructions,
         enabled: true,
         order,
         base_skill_id,
-    };
-    config.skills.push(skill.clone());
+        updated_at_ms: 0,
+    });
     persist_skills_change(&app, &state, config)?;
-    Ok(skill)
+    lock(&state.skills_config)?
+        .skills
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .ok_or_else(|| "skill vanished after persist".to_string())
 }
 
 #[tauri::command]
@@ -713,7 +786,11 @@ pub async fn logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), St
     if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
         crate::auth::clear_session(&path);
     }
-    if let Ok(path) = app.path().app_config_dir().map(|d| d.join("subscription.json")) {
+    if let Ok(path) = app
+        .path()
+        .app_config_dir()
+        .map(|d| d.join("subscription.json"))
+    {
         crate::auth::clear_subscription(&path);
     }
     *state.auth_session.lock().unwrap() = None;

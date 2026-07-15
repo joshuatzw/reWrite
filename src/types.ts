@@ -5,6 +5,7 @@ export interface Skill {
   enabled: boolean;
   order: number;
   base_skill_id?: string | null;
+  updated_at_ms?: number;
 }
 
 export interface SkillsConfig {
@@ -12,6 +13,8 @@ export interface SkillsConfig {
   skills: Skill[];
   builtin_enabled: Record<string, boolean>;
   default_skill_id: string;
+  deleted_skills?: Record<string, number>;
+  scalar_updated_at_ms?: number;
 }
 
 export interface Config {
