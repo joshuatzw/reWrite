@@ -12,9 +12,12 @@ import { ACCENT, BUILTIN_SKILL_OPTIONS, FREE_TIER_MONTHLY_LIMIT } from "./settin
 import { IconLock, Sidebar, Toggle } from "./settingsComponents";
 import { AccessibilityView } from "./AccessibilityView";
 import {
+  computeActivityHeatmap,
+  computeSkillUsage,
   computeStreak,
   computeWordStats,
   firstNameFromEmail,
+  formatHoursSaved,
   formatRenewalDate,
   formatTime,
   getGreeting,
@@ -136,21 +139,30 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
 
 // ── Home View ──────────────────────────────────────────────────────────────────
 
-function HomeView({ history, skillsConfig, config, authState, accessibilityGranted, isMacos, onOpenAccessibility }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config; authState: AuthState; accessibilityGranted: boolean; isMacos: boolean; onOpenAccessibility: () => void }) {
+function HomeView({ history, config, authState, accessibilityGranted, isMacos, onOpenAccessibility }: { history: HistoryEntry[]; skillsConfig: SkillsConfig; config: Config; authState: AuthState; accessibilityGranted: boolean; isMacos: boolean; onOpenAccessibility: () => void }) {
   const greet = getGreeting();
   const { streakDays, weekDots } = computeStreak(history);
   const { total, last7, weekWords } = computeWordStats(history);
   const maxBar = Math.max(...last7, 1);
+  const timeSaved = formatHoursSaved(history.length);
+  const { days: activityDays } = computeActivityHeatmap(history);
+  const activityColumns: { date: Date; count: number }[][] = [];
+  for (let i = 0; i < activityDays.length; i += 7) activityColumns.push(activityDays.slice(i, i + 7));
+  const maxActivity = Math.max(...activityDays.map((d) => d.count), 0);
+  const skillUsage = computeSkillUsage(history);
+  const maxSkillCount = skillUsage.length > 0 ? skillUsage[0].count : 0;
 
   const DAY_LABELS = ["M", "T", "W", "T", "F", "S", "S"];
 
-  const onboarding = [
-    { done: history.length > 0,                                                    label: "reWrite your first email" },
-    { done: skillsConfig.skills.length > 0,                                        label: "Craft your first skill" },
-    { done: config.super_hotkey !== "ctrl+shift+period",                           label: "Set up your super hotkey" },
-    { done: history.some((e) => e.skill_id === "__summarise__"),                   label: "Summarise your meeting notes" },
-  ];
-  const doneCount = onboarding.filter((t) => t.done).length;
+  const bucketFor = (count: number) => {
+    if (count === 0 || maxActivity === 0) return 0;
+    return Math.min(4, Math.ceil((count / maxActivity) * 4));
+  };
+  const bucketOpacity = [1, 0.28, 0.52, 0.76, 1];
+  const bucketStyle = (bucket: number) => ({
+    background: bucket === 0 ? "var(--rw-bg-secondary)" : ACCENT,
+    opacity: bucketOpacity[bucket],
+  });
 
   return (
     <div style={{ padding: "46px 48px 52px", animation: "rwfade .35s ease both" }}>
@@ -195,11 +207,12 @@ function HomeView({ history, skillsConfig, config, authState, accessibilityGrant
               </div>
             ))}
           </div>
+          <div style={{ fontSize: 11.5, color: "var(--rw-text-faint)", marginTop: 18 }}>☁ Synced across devices</div>
         </div>
 
-        {/* Words written */}
+        {/* Words written + time saved */}
         <div style={{ background: "var(--rw-bg-primary)", border: "1px solid var(--rw-border)", borderRadius: 16, padding: "26px 28px" }}>
-          <div style={{ fontSize: 13.5, color: "var(--rw-text-muted)", letterSpacing: .2 }}>Total words written</div>
+          <div style={{ fontSize: 13.5, color: "var(--rw-text-muted)", letterSpacing: .2 }}>Words rewritten</div>
           <div style={{ fontSize: 31, fontWeight: 700, color: "var(--rw-text-primary)", marginTop: 7, fontVariantNumeric: "tabular-nums" }}>
             {total.toLocaleString()}
           </div>
@@ -217,44 +230,70 @@ function HomeView({ history, skillsConfig, config, authState, accessibilityGrant
               ? <><span style={{ color: ACCENT, fontWeight: 600 }}>+{weekWords.toLocaleString()}</span> this week</>
               : "No rewrites this week yet"}
           </div>
+
+          <div style={{ height: 1, background: "var(--rw-border)", margin: "20px 0 16px" }} />
+
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 12.5, color: "var(--rw-text-muted)", letterSpacing: .2 }}>Time saved</span>
+            <span style={{ fontSize: 19, fontWeight: 700, color: "var(--rw-text-primary)", fontVariantNumeric: "tabular-nums" }}>{timeSaved}</span>
+          </div>
         </div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-        {/* Onboarding */}
+        {/* Writing activity heatmap */}
         <div style={{ background: "var(--rw-bg-primary)", border: "1px solid var(--rw-border)", borderRadius: 16, padding: "26px 28px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 20 }}>
-            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "var(--rw-text-primary)" }}>Get to know reWrite</h3>
-            <span style={{ fontSize: 12.5, color: "var(--rw-text-faint)", fontWeight: 500 }}>{doneCount} of {onboarding.length}</span>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            {onboarding.map((t, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 13, padding: "9px 4px" }}>
-                {t.done ? (
-                  <span style={{ width: 22, height: 22, borderRadius: "50%", background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="var(--rw-on-accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7.5 6 10.5 11.5 4" /></svg>
-                  </span>
-                ) : (
-                  <span style={{ width: 22, height: 22, borderRadius: "50%", border: "2px solid var(--rw-border-hover)", flexShrink: 0 }} />
-                )}
-                <span style={{ fontSize: 15, color: t.done ? "var(--rw-text-faint)" : "var(--rw-text-primary)", textDecoration: t.done ? "line-through" : "none" }}>{t.label}</span>
-              </div>
+          <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "var(--rw-text-primary)", marginBottom: 20 }}>Writing activity</h3>
+          {history.length === 0 ? (
+            <div style={{ fontSize: 13.5, color: "var(--rw-text-faint)", padding: "18px 0" }}>Your rewrites will show up here.</div>
+          ) : (
+            <div style={{ display: "flex", gap: 3, overflowX: "auto" }}>
+              {activityColumns.map((col, ci) => (
+                <div key={ci} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {col.map((day, di) => {
+                    const bucket = bucketFor(day.count);
+                    return (
+                      <div
+                        key={di}
+                        title={`${day.date.toDateString()}: ${day.count} rewrite${day.count !== 1 ? "s" : ""}`}
+                        style={{ width: 11, height: 11, borderRadius: 3, ...bucketStyle(bucket) }}
+                      />
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 16, fontSize: 11.5, color: "var(--rw-text-faint)" }}>
+            <span>Less</span>
+            {[0, 1, 2, 3, 4].map((bucket) => (
+              <div key={bucket} style={{ width: 10, height: 10, borderRadius: 3, ...bucketStyle(bucket) }} />
             ))}
+            <span>More</span>
           </div>
         </div>
 
-        {/* Video placeholder */}
-        <div style={{ background: "var(--rw-bg-primary)", border: "1px solid var(--rw-border)", borderRadius: 16, padding: "14px 14px 22px", display: "flex", flexDirection: "column" }}>
-          <div style={{ position: "relative", width: "100%", height: 208, borderRadius: 11, overflow: "hidden", background: "repeating-linear-gradient(135deg,var(--rw-bg-subtle) 0 13px,var(--rw-border) 13px 26px)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ position: "absolute", top: 12, left: 14, fontFamily: "monospace", fontSize: 11, letterSpacing: .5, color: "var(--rw-text-faint)" }}>intro video · 0:48</span>
-            <div style={{ width: 60, height: 60, borderRadius: "50%", background: "var(--rw-scrim)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 18px rgba(20,20,26,.25)" }}>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="var(--rw-on-accent)"><path d="M8 5.5v13l11-6.5z" /></svg>
+        {/* Top skills */}
+        <div style={{ background: "var(--rw-bg-primary)", border: "1px solid var(--rw-border)", borderRadius: 16, padding: "26px 28px" }}>
+          <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "var(--rw-text-primary)", marginBottom: 20 }}>Top skills</h3>
+          {skillUsage.length === 0 ? (
+            <div style={{ fontSize: 13.5, color: "var(--rw-text-faint)", padding: "18px 0" }}>No skills used yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {skillUsage.map((s) => {
+                const pct = maxSkillCount > 0 ? Math.max((s.count / maxSkillCount) * 100, 4) : 0;
+                return (
+                  <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span style={{ fontSize: 13.5, color: "var(--rw-text-secondary)", width: 108, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+                    <div style={{ flex: 1, height: 10, background: "var(--rw-bg-secondary)", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: ACCENT, borderRadius: 4 }} />
+                    </div>
+                    <span style={{ fontSize: 12.5, color: "var(--rw-text-muted)", fontVariantNumeric: "tabular-nums", width: 22, textAlign: "right", flexShrink: 0 }}>{s.count}</span>
+                  </div>
+                );
+              })}
             </div>
-          </div>
-          <div style={{ padding: "18px 14px 2px" }}>
-            <h3 style={{ fontFamily: "'Playfair Display', serif", fontWeight: 600, fontSize: 21, color: "var(--rw-text-primary)" }}>Introducing reWrite</h3>
-            <p style={{ fontSize: 14.5, color: "var(--rw-text-muted)", marginTop: 6, lineHeight: 1.45 }}>Your daily tasks, made easier, every word in your voice.</p>
-          </div>
+          )}
         </div>
       </div>
 

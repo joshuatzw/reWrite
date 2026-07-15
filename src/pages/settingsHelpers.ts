@@ -98,6 +98,57 @@ export function computeWordStats(entries: HistoryEntry[]): WordStats {
   return { total, last7, weekWords };
 }
 
+/* Time saved = 0.015h per rewrite — CONFIRM constant with user */
+export const HOURS_SAVED_PER_REWRITE = 0.015;
+
+export function formatHoursSaved(rewriteCount: number): string {
+  // Work in whole minutes so rounding can never surface an impossible
+  // "1h 60m" — carry the minute into the hour instead.
+  const totalMin = Math.round(HOURS_SAVED_PER_REWRITE * rewriteCount * 60);
+  if (totalMin < 60) return `${totalMin}m`;
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
+interface ActivityDay {
+  date: Date;
+  count: number;
+}
+
+// Last 17 weeks (119 days) of activity, oldest first, today last — so
+// rendering columns of 7 consecutive entries (top→bottom = chronological)
+// naturally places the newest day in the bottom-right cell.
+export function computeActivityHeatmap(entries: HistoryEntry[], totalDays = 119): { days: ActivityDay[] } {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    const d = new Date(e.timestamp_ms);
+    d.setHours(0, 0, 0, 0);
+    const key = d.toDateString();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  const days: ActivityDay[] = [];
+  for (let i = totalDays - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    days.push({ date: d, count: counts.get(d.toDateString()) ?? 0 });
+  }
+  return { days };
+}
+
+export function computeSkillUsage(entries: HistoryEntry[]): { name: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    counts.set(e.skill_name, (counts.get(e.skill_name) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+}
+
 export function groupByDate(entries: HistoryEntry[]): { label: string; items: HistoryEntry[] }[] {
   const todayStr = new Date().toDateString();
   const yestStr = new Date(Date.now() - 86400000).toDateString();
