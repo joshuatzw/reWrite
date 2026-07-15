@@ -1,6 +1,6 @@
 import { BUILTIN_SKILLS } from "../skills";
 
-export const APP_VERSION = "1.1.6";
+export const APP_VERSION = "1.1.7";
 // Brand "ink" accent, defined as a CSS custom property in src/theme.css so it
 // automatically follows the OS light/dark appearance (see that file for the
 // light/dark values and the reasoning behind them). Every existing call site
