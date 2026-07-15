@@ -33,6 +33,11 @@ export function firstNameFromEmail(email: string): string {
   return part.charAt(0).toUpperCase() + part.slice(1);
 }
 
+export function displayName(authState: { name?: string; email: string }): string {
+  const n = authState.name?.trim();
+  return n ? n : firstNameFromEmail(authState.email);
+}
+
 export function initialsFromEmail(email: string): string {
   const parts = email.split("@")[0].split(/[._]/);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();

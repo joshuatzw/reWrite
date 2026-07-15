@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import logoBlack from "../assets/rewrite_logo_black.png";
 import { ACCENT, APP_VERSION } from "./settingsConstants";
-import { initialsFromEmail } from "./settingsHelpers";
+import { displayName, initialsFromEmail } from "./settingsHelpers";
 import type { ActiveView, AuthState } from "./settingsTypes";
 
 export function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
@@ -63,6 +63,12 @@ export const IconLock = () => (
   </svg>
 );
 
+export const IconPencil = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17 3.5a2.1 2.1 0 0 1 3 3L7.5 19 3 20l1-4.5z" />
+  </svg>
+);
+
 export const IconShield = () => (
   <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 3.2 4.5 6v6.2c0 4.6 3.1 8.2 7.5 9.6 4.4-1.4 7.5-5 7.5-9.6V6z" />
@@ -120,7 +126,7 @@ export function Sidebar({ active, setActive, authState, accessibilityGranted, is
             {initialsFromEmail(authState.email)}
           </div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{authState.email}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName(authState)}</div>
             <div style={{ fontSize: 11.5, color: "var(--rw-text-muted)" }}>{authState.is_subscribed ? (authState.plan === "max" ? "reWrite Max" : "reWrite Pro") : "Free plan"}</div>
           </div>
         </div>

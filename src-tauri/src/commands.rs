@@ -665,6 +665,7 @@ pub fn get_history(state: State<AppState>) -> Vec<crate::history::HistoryEntry> 
 pub struct AuthState {
     pub logged_in: bool,
     pub email: String,
+    pub name: String,
     pub is_subscribed: bool,
     pub subscription_valid_until: Option<String>,
     pub rewrite_count: u32,
@@ -681,6 +682,7 @@ pub fn get_auth_state(state: State<AppState>) -> AuthState {
             .as_ref()
             .map(|s| s.email.clone())
             .unwrap_or_default(),
+        name: session.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
         is_subscribed: sub.is_subscribed,
         subscription_valid_until: sub.subscription_valid_until.clone(),
         rewrite_count: sub.rewrite_count,
@@ -772,5 +774,38 @@ pub async fn refresh_subscription(
 
     crate::persist_subscription(&app, &sub);
     *state.subscription.lock().unwrap() = sub;
+    Ok(())
+}
+
+/// Persists `name` onto the in-memory session and to `auth.json`, best-effort
+/// on the disk write (mirrors `ensure_valid_token`'s refreshed-session save).
+fn store_display_name(app: &AppHandle, state: &AppState, name: &str) -> Result<(), String> {
+    let mut session = lock(&state.auth_session)?;
+    let Some(session) = session.as_mut() else {
+        return Err("Not logged in".to_string());
+    };
+    session.name = name.to_string();
+    if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
+        let _ = crate::auth::save_session(session, &path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_display_name(
+    name: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let access_token = crate::ensure_valid_token(&app)
+        .await
+        .ok_or("Not logged in")?;
+
+    crate::auth::set_display_name(&state.http_client, &access_token, &name)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    store_display_name(&app, &state, &name)?;
+    let _ = app.emit("auth:complete", ());
     Ok(())
 }
