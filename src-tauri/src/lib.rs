@@ -655,14 +655,19 @@ fn clamp_rect_to_monitor(x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
 }
 
 /// Places a `w`x`h` menu relative to anchor `(ax, ay)` inside work area
-/// `(left, top, right, bottom)`. Prefers below-right of the anchor; flips
-/// above when it would overflow the bottom, and left when it would overflow
-/// the right. Falls back to clamping when neither side fits.
+/// `(left, top, right, bottom)`. Horizontally prefers the anchor's left edge,
+/// flipping left near the right edge. Vertically: when the bubble sits in the
+/// bottom `UPWARD_ZONE` of the work area the menu opens *upward* — its
+/// bottom-left corner anchored at the bubble — so it's never clipped by the
+/// Dock/taskbar; otherwise it opens downward from the bubble's top-left. A
+/// final clamp keeps it fully on-screen.
 fn place_menu(ax: f64, ay: f64, w: f64, h: f64, work: (f64, f64, f64, f64)) -> (f64, f64) {
     const GAP: f64 = 8.0;
+    const UPWARD_ZONE: f64 = 0.30;
     let (left, top, right, bottom) = work;
     let x = if ax + GAP + w <= right { ax + GAP } else { ax - w };
-    let y = if ay + GAP + h <= bottom { ay + GAP } else { ay - h };
+    let opens_upward = ay >= bottom - UPWARD_ZONE * (bottom - top);
+    let y = if opens_upward { ay - h } else { ay + GAP };
     let max_x = (right - w).max(left);
     let max_y = (bottom - h).max(top);
     (x.clamp(left, max_x), y.clamp(top, max_y))
@@ -686,13 +691,36 @@ mod place_menu_tests {
     #[test]
     fn flips_above_near_bottom() {
         // Anchor close to the bottom of the work area (not the full display)
-        // — the menu must flip to appear above the anchor, not get clamped
-        // under the Dock.
+        // — the menu must open upward (bottom-left corner at the bubble), not
+        // get clamped under the Dock.
         let (_, _, _, bottom) = WORK;
         let ay = bottom - 20.0;
         let (_, y) = place_menu(500.0, ay, 168.0, 180.0, WORK);
         assert_eq!(y, ay - 180.0);
         assert!(y + 180.0 <= bottom, "menu must stay within the work area");
+    }
+
+    #[test]
+    fn opens_upward_in_bottom_zone_even_when_it_would_fit() {
+        // Bubble in the bottom 30% of the work area: the menu opens upward
+        // (bottom-left corner at the bubble) even though it would still fit
+        // below — the whole point of the zone rule.
+        let (_, top, _, bottom) = WORK;
+        // 25% up: inside the bottom-30% zone, yet with room to fit below too.
+        let ay = bottom - 0.25 * (bottom - top);
+        assert!(ay >= bottom - 0.30 * (bottom - top), "precondition: in the zone");
+        assert!(ay + 8.0 + 180.0 <= bottom, "precondition: it would fit below");
+        let (_, y) = place_menu(500.0, ay, 168.0, 180.0, WORK);
+        assert_eq!(y, ay - 180.0, "should anchor bottom-left at the bubble");
+    }
+
+    #[test]
+    fn opens_downward_just_above_the_zone() {
+        // Just above the bottom-30% boundary: still opens downward.
+        let (_, top, _, bottom) = WORK;
+        let ay = bottom - 0.35 * (bottom - top);
+        let (_, y) = place_menu(500.0, ay, 168.0, 180.0, WORK);
+        assert_eq!(y, ay + 8.0);
     }
 
     #[test]
