@@ -804,7 +804,11 @@ fn clamp_to_monitor(_window: &WebviewWindow, x: f64, y: f64) -> (f64, f64) {
 fn work_area_containing_point(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
     #[cfg(target_os = "macos")]
     {
-        return mac_display::work_area_containing(x, y);
+        // Prefer the Dock-excluding visible frame; if that AppKit lookup fails,
+        // fall back to full display bounds so `place_menu` still flips upward
+        // near the bottom edge (rather than the caller clamping downward).
+        return mac_display::work_area_containing(x, y)
+            .or_else(|| mac_display::display_bounds_containing(x, y));
     }
 
     #[cfg(target_os = "windows")]
@@ -945,10 +949,16 @@ pub fn show_bubble_menu(app: &AppHandle, x: f64, y: f64) {
             // see `place_menu`'s doc comment. Only fall back to the plain
             // clamp-to-full-display behavior if that lookup fails.
             let (menu_w, menu_h) = menu_logical_size(&w);
-            let (x, y) = match work_area_containing_point(x, y) {
-                Some(work) => place_menu(x, y, menu_w, menu_h, work),
+            let work = work_area_containing_point(x, y);
+            let (nx, ny) = match work {
+                Some(area) => place_menu(x, y, menu_w, menu_h, area),
                 None => clamp_to_monitor(&w, x + 8.0, y + 8.0),
             };
+            trace(&format!(
+                "bubble_menu placement: anchor=({x:.0},{y:.0}) menu=({menu_w:.0}x{menu_h:.0}) work={work:?} -> ({nx:.0},{ny:.0}) upward={}",
+                ny < y
+            ));
+            let (x, y) = (nx, ny);
             // Same points-vs-physical-pixels distinction as `show_bubble` —
             // see that call site's comment.
             #[cfg(target_os = "macos")]
