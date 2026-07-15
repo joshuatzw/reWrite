@@ -7,7 +7,7 @@ import { buildItems, type SkillItem } from "../skills";
 
 type Status = "idle" | "loading" | "error";
 
-const EMPTY_SKILL_ITEMS = buildItems({ global_instructions: "", skills: [], builtin_enabled: {} });
+const EMPTY_SKILL_ITEMS = buildItems({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
 
 const isLimitError = (msg: string) => /limit|trial|quota|upgrade/i.test(msg);
 

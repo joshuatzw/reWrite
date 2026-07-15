@@ -30,8 +30,8 @@ export default function Bubble() {
     >
       {/* Outer ring: a conic-gradient rotated slowly via the shared rw-spin
           keyframe (src/index.css) so the outline cycles blue -> green ->
-          yellow -> red -> blue. White circle on top masks all but the ring,
-          with the reWrite logo centered on it — chosen for contrast against
+          yellow -> red -> blue. The circular new icon on top masks all but the
+          ring, with the reWrite logo centered on it — chosen for contrast against
           dark editor themes (e.g. VS Code) where the original near-black dot
           was invisible, and recognizable as this app's own affordance rather
           than a generic dot.
@@ -61,6 +61,7 @@ export default function Bubble() {
             position: "absolute",
             inset: 3.75,
             borderRadius: "50%",
+            overflow: "hidden",
             background: "#ffffff",
             boxShadow: "0 0 3px 1px rgba(0,0,0,0.25)",
             display: "flex",
@@ -68,7 +69,11 @@ export default function Bubble() {
             justifyContent: "center",
           }}
         >
-          <img src={logoBlack} alt="" style={{ width: 15, height: "auto", userSelect: "none", pointerEvents: "none" }} />
+          <img
+            src={logoBlack}
+            alt=""
+            style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%", userSelect: "none", pointerEvents: "none" }}
+          />
         </div>
       </div>
     </div>

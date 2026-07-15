@@ -98,6 +98,11 @@ History: `%APPDATA%\com.rewrite.app\history.json`
 
 ## Development
 
+Before changing the codebase, read `agent.md` and start from `infrastructure.md`.
+The infrastructure map is the source of truth for which files own which concerns,
+and it must be updated whenever files are added, removed, renamed, or materially
+changed.
+
 ```bash
 # Install dependencies
 npm install

@@ -9,11 +9,12 @@ use std::{
         Mutex,
     },
 };
+#[cfg(target_os = "macos")]
+use tauri::LogicalPosition;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
-    WebviewWindow,
+    AppHandle, Emitter, Listener, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
 };
 
 pub mod auth;
@@ -29,6 +30,7 @@ pub mod secure_store;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod selection_watcher;
 pub mod skills;
+pub mod sync;
 
 /// Visible size (logical px) of the bubble ring drawn in Bubble.tsx. Kept in
 /// sync with that component's own hardcoded size.
@@ -160,6 +162,21 @@ pub fn remember_paste_target_window(app: &AppHandle) {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn remember_paste_target_window(_app: &AppHandle) {}
 
+/// Read-only accessor for `PASTE_TARGET_PID` — the pid of the app that owned
+/// the selection when it was last detected (see `remember_paste_target_window`
+/// above). Exposed as a function rather than making the static itself
+/// `pub(crate)`, matching this file's existing pattern for state private to
+/// `lib.rs` (`remember_paste_target_window`/`focus_paste_target_window`).
+/// Used by `selection_watcher`'s mac frontmost-app-switch check to avoid
+/// clearing the bubble just because the source app (not reWrite) is
+/// frontmost — which is the normal, expected state while the bubble is
+/// visible, since `show_bubble`/`show_bubble_menu` deliberately don't steal
+/// foreground. 0 means "never set" (no selection captured yet this session).
+#[cfg(target_os = "macos")]
+pub(crate) fn paste_target_pid() -> i32 {
+    PASTE_TARGET_PID.load(Ordering::SeqCst)
+}
+
 #[cfg(target_os = "windows")]
 pub fn focus_paste_target_window(_app: &AppHandle) {
     use windows::Win32::Foundation::HWND;
@@ -235,6 +252,7 @@ pub struct AppState {
     pub foreground_format: Mutex<foreground::OutputFormat>,
     pub config: Mutex<config::Config>,
     pub skills_config: Mutex<skills::SkillsConfig>,
+    pub skills_write_lock: Mutex<()>,
     pub history: Mutex<history::HistoryStore>,
     pub http_client: reqwest::Client,
     pub is_capturing: AtomicBool,
@@ -1060,6 +1078,10 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
         return;
     };
 
+    // Bring the settings window forward so the user lands back in the app
+    // (already signed in) after the browser hands off the tokens.
+    show_settings(app);
+
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let Some(state) = app.try_state::<AppState>() else {
@@ -1067,15 +1089,14 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
         };
         let client = state.http_client.clone();
 
-        let email = auth::get_user_email(&client, &access_token)
-            .await
-            .unwrap_or_default();
+        let user = auth::get_user(&client, &access_token).await.ok();
 
         let session = auth::AuthSession {
+            user_id: user.as_ref().map(|u| u.id.clone()).unwrap_or_default(),
             access_token: access_token.clone(),
             refresh_token,
             expires_at,
-            email,
+            email: user.and_then(|u| u.email).unwrap_or_default(),
         };
 
         if let Ok(path) = app.path().app_config_dir().map(|d| d.join("auth.json")) {
@@ -1083,13 +1104,21 @@ fn handle_deep_link(app: &AppHandle, url: &str) {
         }
 
         *state.auth_session.lock().unwrap() = Some(session.clone());
+        // Let the login view transition immediately; subscription and cloud
+        // reconciliation remain background/best-effort and emit their own
+        // refresh events as data arrives.
+        let _ = app.emit("auth:complete", ());
+        let sync_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = sync::sync_all(&sync_app).await {
+                trace(&format!("cloud sync after login failed: {error}"));
+            }
+        });
 
         if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
             persist_subscription(&app, &sub);
             *state.subscription.lock().unwrap() = sub;
         }
-
-        let _ = app.emit("auth:complete", ());
     });
 }
 
@@ -1336,23 +1365,17 @@ fn on_super_hotkey(app: &AppHandle) {
             let _ = app.emit("usage:updated", ());
         }
 
-        {
-            let entry = history::HistoryEntry {
-                id: skills::new_id(),
-                timestamp_ms: history::now_ms(),
-                skill_id: default_skill_id,
-                skill_name,
-                input_text: text,
-                output_text: plain_output.clone(),
-                output_word_count: history::count_words(&plain_output),
-            };
-            if let (Ok(mut h), Ok(path)) = (
-                state.history.lock(),
-                app.path().app_config_dir().map(|d| d.join("history.json")),
-            ) {
-                h.entries.push(entry);
-                let _ = history::save(&h, &path);
-            }
+        let entry = history::HistoryEntry {
+            id: skills::new_id(),
+            timestamp_ms: history::now_ms(),
+            skill_id: default_skill_id,
+            skill_name,
+            input_text: text,
+            output_text: plain_output.clone(),
+            output_word_count: history::count_words(&plain_output),
+        };
+        if let Err(error) = history::append_and_sync(&app, &state, entry) {
+            trace(&format!("history append failed: {error}"));
         }
 
         focus_paste_target_window(&app);
@@ -1439,6 +1462,7 @@ pub fn run() {
             foreground_format: Mutex::new(foreground::OutputFormat::default()),
             config: Mutex::new(config::Config::default()),
             skills_config: Mutex::new(skills::SkillsConfig::default()),
+            skills_write_lock: Mutex::new(()),
             history: Mutex::new(history::HistoryStore::default()),
             http_client: reqwest::Client::new(),
             is_capturing: AtomicBool::new(false),
@@ -1455,7 +1479,7 @@ pub fn run() {
             // writes it. Used below to greet the user with the Settings window
             // so they know reWrite is running.
             let is_first_run = !config_path.exists();
-            let loaded_config = config::load(&config_path);
+            let mut loaded_config = config::load(&config_path);
             if is_first_run {
                 // Write the file now so the Settings-on-launch greeting only
                 // ever fires once, even if the user closes Settings without
@@ -1464,12 +1488,27 @@ pub fn run() {
             }
             let hotkey = loaded_config.hotkey.clone();
             let super_hotkey = loaded_config.super_hotkey.clone();
+            let default_skill_id = loaded_config.default_skill_id.clone();
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             let bubble_enabled = loaded_config.bubble_enabled;
-            *app.state::<AppState>().config.lock().unwrap() = loaded_config;
-
             let skills_path = app.path().app_config_dir()?.join("skills.json");
-            let loaded_skills = skills::load(&skills_path);
+            let skills_has_synced_default = skills::file_has_default_skill_id(&skills_path);
+            let mut loaded_skills = skills::load(&skills_path);
+            if skills_has_synced_default {
+                // Once the synced field exists, it is authoritative over the
+                // compatibility mirror in config.toml (which may lag after a
+                // partial write/crash). Repair only the mirror.
+                if loaded_config.default_skill_id != loaded_skills.default_skill_id {
+                    loaded_config.default_skill_id = loaded_skills.default_skill_id.clone();
+                    let _ = config::save(&loaded_config, &config_path);
+                }
+            } else {
+                // Older skills.json files predate this field. config.toml is
+                // the one-time migration source; no skills file write here,
+                // so its logical edit time is not falsely advanced pre-sync.
+                loaded_skills.default_skill_id = default_skill_id;
+            }
+            *app.state::<AppState>().config.lock().unwrap() = loaded_config;
             *app.state::<AppState>().skills_config.lock().unwrap() = loaded_skills;
 
             let history_path = app.path().app_config_dir()?.join("history.json");
@@ -1521,6 +1560,13 @@ pub fn run() {
                     } else {
                         session
                     };
+
+                    let sync_app = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = sync::sync_all(&sync_app).await {
+                            trace(&format!("cloud sync at startup failed: {error}"));
+                        }
+                    });
 
                     if let Ok(sub) = auth::sync_subscription(&client, &session.access_token).await {
                         persist_subscription(&app_handle, &sub);
@@ -1877,7 +1923,15 @@ pub fn run() {
                 .tooltip(&tooltip)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => show_settings(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // Chrome counts AXEnhancedUserInterface enable/disable
+                        // requests. Balance any activation owned by the macOS
+                        // passive watcher before normal tray exit rather than
+                        // leaving Chrome in complete AX mode until Chrome quits.
+                        #[cfg(target_os = "macos")]
+                        selection_watcher::stop();
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .build(app)?;
@@ -1925,6 +1979,7 @@ pub fn run() {
             commands::get_history,
             commands::get_auth_state,
             commands::send_magic_link,
+            commands::open_google_login,
             commands::logout,
             commands::open_checkout,
             commands::open_billing_portal,

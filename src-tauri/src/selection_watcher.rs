@@ -623,6 +623,7 @@ mod mac {
     const FLAG_MASK_COMMAND: i64 = 1 << 20;
     const FLAG_MASK_ALTERNATE: i64 = 1 << 19;
     const AX_ERROR_SUCCESS: AXError = 0;
+    const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
     const AX_VALUE_CGRECT: AXValueType = 3;
     const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const AX_FOCUSED_UI_ELEMENT: &str = "AXFocusedUIElement";
@@ -630,6 +631,19 @@ mod mac {
     const AX_SELECTED_TEXT_RANGE: &str = "AXSelectedTextRange";
     const AX_BOUNDS_FOR_RANGE: &str = "AXBoundsForRange";
     const AX_VALUE: &str = "AXValue";
+    /// See `is_element_editable`'s role-based branch for why this is read.
+    const AX_ROLE: &str = "AXRole";
+    /// See `maybe_activate_manual_accessibility` for why this is needed.
+    const AX_MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
+    /// Chrome's application-level signal that a real assistive-technology
+    /// client needs the complete web accessibility tree. See
+    /// `maybe_activate_frontmost_application`.
+    const AX_ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
+    /// Current Chromium deliberately debounces `AXEnhancedUserInterface` for
+    /// two seconds on macOS Sonoma+ before enabling complete accessibility.
+    /// Re-probe after three seconds so the renderer also has time to publish
+    /// its newly-enabled web tree, without blocking the event-tap or worker.
+    const APPLICATION_ACTIVATION_REPROBE_DELAY: Duration = Duration::from_secs(3);
 
     type AXError = i32;
     type AXValueType = u32;
@@ -746,6 +760,7 @@ mod mac {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+        fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
         fn AXUIElementCopyAttributeValue(
             element: AXUIElementRef,
             attribute: CFStringRef,
@@ -778,12 +793,20 @@ mod mac {
             the_type: AXValueType,
             value_ptr: *mut c_void,
         ) -> Boolean;
+        fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
+        fn AXUIElementSetAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> AXError;
 
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         static kCFRunLoopDefaultMode: CFStringRef;
+        static kCFBooleanFalse: CFTypeRef;
+        static kCFBooleanTrue: CFTypeRef;
         fn CFStringCreateWithCString(
             alloc: CFAllocatorRef,
             c_str: *const c_char,
@@ -898,23 +921,26 @@ mod mac {
         {
             let mut state = TAP.lock().unwrap();
             was_active = !matches!(*state, TapState::Idle);
+            // Also gates any worker probe that was already in flight from
+            // activating a target application after teardown has begun.
+            STOP_REQUESTED.store(true, Ordering::SeqCst);
             match *state {
                 TapState::Idle => {}
                 TapState::Starting => {
                     *state = TapState::Idle;
                 }
                 TapState::Running(rl_ptr) => {
-                    STOP_REQUESTED.store(true, Ordering::SeqCst);
                     unsafe { CFRunLoopStop(rl_ptr as CFRunLoopRef) };
                     *state = TapState::Idle;
                 }
             }
         }
-        if !was_active {
-            return;
-        }
         if let Some(tx) = NOTIFY_TX.lock().unwrap().take() {
             let _ = tx.send(WorkerMsg::Shutdown);
+        }
+        unsafe { deactivate_frontmost_applications() };
+        if !was_active {
+            return;
         }
         clear_selection();
     }
@@ -993,6 +1019,7 @@ mod mac {
             // loop, some newer generation owns it and we must stop too.
             loop {
                 let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+                check_frontmost_app_switch();
                 if STOP_REQUESTED.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1209,6 +1236,72 @@ mod mac {
         }
     }
 
+    /// Dedicated frontmost-application-change check, polled once per
+    /// `run_tap_thread` iteration (every ~0.25s — see the loop above). This
+    /// exists because switching *which app is frontmost* — Cmd+Tab, a Dock
+    /// click, a trackpad swipe, Mission Control — does not reliably generate
+    /// any CGEvent in this tap's mouse/keyboard mask (unlike, say, clicking
+    /// into an already-frontmost other app, which the existing mouse-up
+    /// probe in `tap_callback` already handles). Without this, the bubble
+    /// stays stuck on screen, anchored to a selection in an app that's no
+    /// longer frontmost, until the user happens to click or type again.
+    /// Cheap no-op when there's no bubble tracked.
+    fn check_frontmost_app_switch() {
+        if !HAD_SELECTION.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(app) = APP.get() else {
+            return;
+        };
+        // Fire-and-forget: unlike `foreground::detect_impl`'s synchronous
+        // main-thread round trip (fine there — it's a one-shot call kicked
+        // off by a hotkey), this runs every ~0.25s on the same thread that
+        // owns the CGEventTap's run loop, so it must never block waiting on
+        // a reply. The closure does its own comparison and sends
+        // `WorkerMsg::Clear` itself instead of reporting back.
+        let _ = app.run_on_main_thread(|| {
+            use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+            let frontmost_pid = unsafe {
+                NSWorkspace::sharedWorkspace()
+                    .frontmostApplication()
+                    .map(|running_app| running_app.processIdentifier())
+            };
+            let own_pid = unsafe { NSRunningApplication::currentApplication().processIdentifier() };
+            // The source app (the one that owned the selection when it was
+            // detected — see `remember_source_pid`/`crate::paste_target_pid`)
+            // is deliberately still frontmost for the whole time the bubble
+            // is visible: `show_bubble`/`show_bubble_menu` build those
+            // windows with `.focused(false)` and never call `.set_focus()`,
+            // specifically so showing the bubble doesn't steal foreground
+            // from the source app. So the source app being frontmost is the
+            // normal steady state, not a switch — only clear when frontmost
+            // is neither reWrite itself (legitimate: user clicked the
+            // bubble/menu) nor the source app.
+            let source_pid = crate::paste_target_pid();
+            if should_clear_for_frontmost_switch(own_pid, source_pid, frontmost_pid) {
+                if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref().cloned() {
+                    let _ = tx.send(WorkerMsg::Clear);
+                }
+            }
+        });
+    }
+
+    /// Pure decision logic behind `check_frontmost_app_switch`, split out so
+    /// it's directly unit-testable without any AppKit FFI — see `mod tests`
+    /// below. `None` (no frontmost app reported) is treated as "don't clear"
+    /// rather than "clear": a transient `NSWorkspace` lookup failure/gap
+    /// shouldn't hide a bubble that may still be pointing at the right app.
+    fn should_clear_for_frontmost_switch(
+        own_pid: i32,
+        source_pid: i32,
+        frontmost_pid: Option<i32>,
+    ) -> bool {
+        match frontmost_pid {
+            Some(pid) => pid != own_pid && pid != source_pid,
+            None => false,
+        }
+    }
+
     fn bubble_menu_is_open() -> bool {
         crate::bubble_menu_probe_suppressed()
             || APP
@@ -1224,6 +1317,40 @@ mod mac {
             return;
         };
         crate::remember_paste_target_window(app);
+    }
+
+    /// Read the frontmost application's *main* pid and bundle id on AppKit's
+    /// main thread.
+    /// This deliberately does not use `AXUIElementGetPid` on a web node:
+    /// Chromium web elements can belong to renderer-side accessibility
+    /// objects, while the activation attributes below are implemented by the
+    /// main browser application's `BrowserCrApplication` object.
+    struct FrontmostApplication {
+        pid: i32,
+        bundle_id: Option<String>,
+    }
+
+    fn frontmost_application() -> Option<FrontmostApplication> {
+        let app = APP.get()?;
+        let (tx, rx) = mpsc::channel();
+        let posted = app.run_on_main_thread(move || {
+            use objc2_app_kit::NSWorkspace;
+            let application = unsafe {
+                NSWorkspace::sharedWorkspace()
+                    .frontmostApplication()
+                    .map(|running_app| FrontmostApplication {
+                        pid: running_app.processIdentifier(),
+                        bundle_id: running_app
+                            .bundleIdentifier()
+                            .map(|bundle_id| bundle_id.to_string()),
+                    })
+            };
+            let _ = tx.send(application);
+        });
+        if posted.is_err() {
+            return None;
+        }
+        rx.recv_timeout(Duration::from_millis(500)).ok().flatten()
     }
 
     unsafe fn probe_selection() -> Result<Option<(String, CGRect)>, String> {
@@ -1245,6 +1372,9 @@ mod mac {
         CFRelease(attr as CFTypeRef);
         if err == AX_ERROR_SUCCESS && !focused.is_null() {
             let result = selection_from_element(focused as AXUIElementRef);
+            if !matches!(result, Ok(Some(_))) {
+                maybe_activate_manual_accessibility(focused as AXUIElementRef);
+            }
             CFRelease(focused);
             match result {
                 Ok(Some(selection)) => {
@@ -1265,11 +1395,14 @@ mod mac {
         // (Discord/WhatsApp/Slack/Notion-style Electron UIs).
         let x = f64::from_bits(LAST_MOUSE_UP_X.load(Ordering::Relaxed)) as c_float;
         let y = f64::from_bits(LAST_MOUSE_UP_Y.load(Ordering::Relaxed)) as c_float;
-        let result = if x != 0.0 || y != 0.0 {
+        let point_result = if x != 0.0 || y != 0.0 {
             let mut at_point: AXUIElementRef = std::ptr::null();
             let err = AXUIElementCopyElementAtPosition(system, x, y, &mut at_point);
             if err == AX_ERROR_SUCCESS && !at_point.is_null() {
                 let r = selection_from_element(at_point);
+                if !matches!(r, Ok(Some(_))) {
+                    maybe_activate_manual_accessibility(at_point);
+                }
                 CFRelease(at_point);
                 r
             } else {
@@ -1279,7 +1412,103 @@ mod mac {
             Ok(None)
         };
         CFRelease(system as CFTypeRef);
+        match point_result {
+            Ok(Some(selection)) => return Ok(Some(selection)),
+            Ok(None) => {}
+            Err(e) => crate::trace(&format!(
+                "selection_watcher::probe_selection(mac): system hit-test element error: {e}"
+            )),
+        }
+
+        // Chrome web content has a bootstrapping problem when accessibility is
+        // initially disabled: the system-wide focused-element lookup is empty,
+        // while the system-wide point hit-test returns only Chrome's top-level
+        // AXScrollArea. That container is correctly rejected by the editable
+        // gate above and rejects AXManualAccessibility, so neither path can
+        // discover the selected <input>/<textarea>/contenteditable descendant.
+        //
+        // Resolve Chrome's *main* application pid and bundle id through
+        // NSWorkspace, safely activate that application object (manual first;
+        // enhanced only for recognized Chromium browsers), then query focus and
+        // point-hit-test relative to that application.
+        // Every element still goes through `selection_from_element`, including
+        // `is_element_editable`, so this new route cannot make read-only page
+        // paragraphs eligible for the rewrite bubble.
+        let Some(frontmost) = frontmost_application() else {
+            return Ok(None);
+        };
+        let application = AXUIElementCreateApplication(frontmost.pid);
+        if application.is_null() {
+            return Ok(None);
+        }
+
+        let activated = maybe_activate_frontmost_application(
+            application,
+            frontmost.pid,
+            frontmost.bundle_id.as_deref(),
+        );
+        if activated {
+            schedule_activation_reprobe();
+        }
+
+        let mut app_focused: CFTypeRef = std::ptr::null();
+        let focused_attr = match cfstring(AX_FOCUSED_UI_ELEMENT) {
+            Ok(attr) => attr,
+            Err(error) => {
+                CFRelease(application as CFTypeRef);
+                return Err(error);
+            }
+        };
+        let focused_err =
+            AXUIElementCopyAttributeValue(application, focused_attr, &mut app_focused);
+        CFRelease(focused_attr as CFTypeRef);
+        if focused_err == AX_ERROR_SUCCESS && !app_focused.is_null() {
+            let result = selection_from_element(app_focused as AXUIElementRef);
+            CFRelease(app_focused);
+            match result {
+                Ok(Some(selection)) => {
+                    CFRelease(application as CFTypeRef);
+                    return Ok(Some(selection));
+                }
+                Ok(None) => {}
+                Err(e) => crate::trace(&format!(
+                    "selection_watcher::probe_selection(mac): app focused element error: {e}"
+                )),
+            }
+        }
+
+        let result = if x != 0.0 || y != 0.0 {
+            let mut at_point: AXUIElementRef = std::ptr::null();
+            let err = AXUIElementCopyElementAtPosition(application, x, y, &mut at_point);
+            if err == AX_ERROR_SUCCESS && !at_point.is_null() {
+                let result = selection_from_element(at_point);
+                CFRelease(at_point as CFTypeRef);
+                result
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        };
+        CFRelease(application as CFTypeRef);
         result
+    }
+
+    /// Whether `role` (an `AXRole` string) names a control that's always a
+    /// text-editable field. Pure/no-FFI so it's directly unit-testable — see
+    /// `mod tests` below. This is a narrow allowlist, not a guess: these are
+    /// the roles Chromium/WebKit use for `<input>` (`AXTextField`),
+    /// `<textarea>`/contenteditable (`AXTextArea`), `<input type=search>`
+    /// (`AXSearchField`), and autocomplete/address-bar-style combo inputs
+    /// (`AXComboBox`). Deliberately excludes roles like `AXStaticText` and
+    /// `AXWebArea`/`AXGroup` that cover read-only article/page content —
+    /// widening this list is how the read-only exclusion would quietly break,
+    /// so any addition needs the same "is this always user-editable text" bar.
+    fn is_editable_role(role: &str) -> bool {
+        matches!(
+            role,
+            "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
+        )
     }
 
     /// Whether `element` is an editable text control, mirroring the Windows
@@ -1288,18 +1517,276 @@ mod mac {
     /// fields instead of any selectable text, e.g. a Safari article). AX has
     /// no single "read-only" flag equivalent to UIA's `ValuePattern`, but
     /// `AXUIElementIsAttributeSettable` on `AXValue` is the direct analog:
-    /// true only for controls whose value/text can actually be edited. Fails
-    /// closed (not editable) on any AX error, same rationale as the Windows
-    /// side — read-only content must never win a probe error's benefit of
-    /// the doubt.
+    /// true only for controls whose value/text can actually be edited.
+    ///
+    /// That settable check alone isn't enough, though: Chromium/WebKit browser
+    /// editable fields (Gmail compose, search boxes, plain `<textarea>`/
+    /// `<input>`) frequently report `AXValue` as NOT settable even while
+    /// genuinely editable, because their AX tree is populated lazily and the
+    /// settable bit lags behind. So this also accepts the element via its
+    /// `AXRole` — see `is_editable_role` — as a second, independent path to
+    /// "editable". If the role can't be read, it falls back to the settable
+    /// check alone. Fails closed (not editable) on any AX error, same rationale
+    /// as the Windows side — read-only content must never win a probe error's
+    /// benefit of the doubt.
     unsafe fn is_element_editable(element: AXUIElementRef) -> bool {
-        let Ok(attr) = cfstring(AX_VALUE) else {
+        if let Ok(attr) = cfstring(AX_VALUE) {
+            let mut settable: Boolean = 0;
+            let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
+            CFRelease(attr as CFTypeRef);
+            if err == AX_ERROR_SUCCESS && settable != 0 {
+                return true;
+            }
+        }
+
+        let Ok(role_attr) = cfstring(AX_ROLE) else {
             return false;
         };
-        let mut settable: Boolean = 0;
-        let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
+        let mut role_value: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(element, role_attr, &mut role_value);
+        CFRelease(role_attr as CFTypeRef);
+        if err != AX_ERROR_SUCCESS || role_value.is_null() {
+            return false;
+        }
+        let role = cfstring_to_string(role_value as CFStringRef);
+        CFRelease(role_value);
+        match role {
+            Ok(role) => is_editable_role(&role),
+            Err(_) => false,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ApplicationActivationKind {
+        EnhancedUserInterface,
+        ManualAccessibility,
+        Unsupported,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ApplicationActivation {
+        pid: i32,
+        kind: ApplicationActivationKind,
+    }
+
+    /// One entry per frontmost main application pid attempted during this
+    /// watcher lifetime. Successful entries are balanced back to `false` by
+    /// `deactivate_frontmost_applications` on stop; unsupported entries are
+    /// retained only to avoid retrying/logging on every selection probe.
+    static AX_APPLICATION_ACTIVATIONS: Mutex<Vec<ApplicationActivation>> = Mutex::new(Vec::new());
+
+    /// Chromium browser application bundle ids allowed to receive the strong
+    /// `AXEnhancedUserInterface` signal. Electron apps deliberately are not in
+    /// this list: their supported activation route is AXManualAccessibility.
+    /// Normalize case so the safety decision does not depend on conventional
+    /// capitalization differences between browser channels.
+    fn is_chromium_browser_bundle_id(bundle_id: &str) -> bool {
+        let bundle_id = bundle_id.to_ascii_lowercase();
+        [
+            "com.google.chrome",
+            "org.chromium.chromium",
+            "com.microsoft.edgemac",
+            "com.brave.browser",
+            "company.thebrowser.browser",
+            "com.vivaldi.vivaldi",
+            "com.operasoftware.opera",
+            "com.operasoftware.operagx",
+        ]
+        .iter()
+        .any(|base| {
+            bundle_id == *base
+                || bundle_id
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+    }
+
+    /// Activate the accessibility tree through the target application's own
+    /// AX object. First try `AXManualAccessibility`, the narrow activation
+    /// signal officially supported by Electron. Only when the target rejects
+    /// that specific attribute as unsupported *and* its bundle id identifies a
+    /// known Chromium browser do we send `AXEnhancedUserInterface`, the stronger
+    /// screen-reader-mode signal Chrome's `BrowserCrApplication` listens for.
+    /// On Sonoma+ Chrome waits two seconds after the last enhanced request
+    /// before switching to complete (web) accessibility mode. Unknown/native
+    /// apps never receive the enhanced signal.
+    ///
+    /// The mutex covers the attempt as well as the bookkeeping. Combined with
+    /// the `STOP_REQUESTED` checks, this prevents a probe already in flight
+    /// from setting an application back to true just after watcher teardown.
+    /// Returns true only for the first successful activation of this pid, so
+    /// the caller schedules exactly one delayed re-probe and no thread storm.
+    unsafe fn maybe_activate_frontmost_application(
+        application: AXUIElementRef,
+        pid: i32,
+        bundle_id: Option<&str>,
+    ) -> bool {
+        if pid == 0 || STOP_REQUESTED.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let mut activations = AX_APPLICATION_ACTIVATIONS.lock().unwrap();
+        if activations.iter().any(|activation| activation.pid == pid)
+            || STOP_REQUESTED.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+
+        let manual_attr = match cfstring(AX_MANUAL_ACCESSIBILITY) {
+            Ok(attr) => attr,
+            Err(_) => return false,
+        };
+        let manual_err = AXUIElementSetAttributeValue(application, manual_attr, kCFBooleanTrue);
+        CFRelease(manual_attr as CFTypeRef);
+
+        let (enhanced_err, kind) = if manual_err == AX_ERROR_SUCCESS {
+            (None, ApplicationActivationKind::ManualAccessibility)
+        } else if manual_err == AX_ERROR_ATTRIBUTE_UNSUPPORTED
+            && bundle_id.is_some_and(is_chromium_browser_bundle_id)
+        {
+            let enhanced_attr = match cfstring(AX_ENHANCED_USER_INTERFACE) {
+                Ok(attr) => attr,
+                Err(_) => return false,
+            };
+            let enhanced_err =
+                AXUIElementSetAttributeValue(application, enhanced_attr, kCFBooleanTrue);
+            CFRelease(enhanced_attr as CFTypeRef);
+            let kind = if enhanced_err == AX_ERROR_SUCCESS {
+                ApplicationActivationKind::EnhancedUserInterface
+            } else {
+                ApplicationActivationKind::Unsupported
+            };
+            (Some(enhanced_err), kind)
+        } else {
+            (None, ApplicationActivationKind::Unsupported)
+        };
+
+        activations.push(ApplicationActivation { pid, kind });
+        let enhanced_result = enhanced_err
+            .map(|err| format!("err={err}"))
+            .unwrap_or_else(|| "not attempted".to_string());
+        let bundle_id = bundle_id.unwrap_or("<unknown>");
+        crate::trace(&format!(
+            "selection_watcher::maybe_activate_frontmost_application(mac): main_pid={pid} bundle_id={bundle_id} AXManualAccessibility err={manual_err}, AXEnhancedUserInterface {enhanced_result}"
+        ));
+        !matches!(kind, ApplicationActivationKind::Unsupported)
+    }
+
+    /// Chrome does not enable its web accessibility tree immediately after
+    /// accepting AXEnhancedUserInterface. Sleep on a short-lived helper thread,
+    /// never on the event-tap or selection worker, then enqueue one ordinary
+    /// recheck. If the watcher stopped/restarted meanwhile, this sender belongs
+    /// to the old disconnected channel and the send simply fails.
+    fn schedule_activation_reprobe() {
+        let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref().cloned() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            std::thread::sleep(APPLICATION_ACTIVATION_REPROBE_DELAY);
+            let _ = tx.send(WorkerMsg::Recheck);
+        });
+    }
+
+    /// Balance successful application-level activations when the selection
+    /// watcher is disabled or Accessibility permission is revoked. In
+    /// particular, this avoids leaving Chrome in complete AX mode indefinitely
+    /// after reWrite no longer has a passive watcher running.
+    unsafe fn deactivate_frontmost_applications() {
+        let activations = {
+            let mut active = AX_APPLICATION_ACTIVATIONS.lock().unwrap();
+            std::mem::take(&mut *active)
+        };
+
+        for activation in activations {
+            let attribute = match activation.kind {
+                ApplicationActivationKind::EnhancedUserInterface => AX_ENHANCED_USER_INTERFACE,
+                ApplicationActivationKind::ManualAccessibility => AX_MANUAL_ACCESSIBILITY,
+                ApplicationActivationKind::Unsupported => continue,
+            };
+            let application = AXUIElementCreateApplication(activation.pid);
+            if application.is_null() {
+                continue;
+            }
+            if let Ok(attr) = cfstring(attribute) {
+                let err = AXUIElementSetAttributeValue(application, attr, kCFBooleanFalse);
+                CFRelease(attr as CFTypeRef);
+                crate::trace(&format!(
+                    "selection_watcher::deactivate_frontmost_applications(mac): pid={} {attribute}=false err={err}",
+                    activation.pid
+                ));
+            }
+            CFRelease(application as CFTypeRef);
+        }
+    }
+
+    /// PIDs already sent the `AXManualAccessibility` activation below. Never
+    /// evicted: once a process has been asked, asking again is a harmless
+    /// no-op, so there's no need to clean this up e.g. when a browser quits —
+    /// a reused pid from a long-exited process just gets one redundant,
+    /// harmless attempt.
+    static AX_ACTIVATED_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    /// Chromium-based apps (Chrome, Edge, Brave, Arc, Vivaldi, and Electron
+    /// apps like VS Code/Notion) only populate the full accessibility tree
+    /// that `AXSelectedText`/`AXSelectedTextRange`/`AXBoundsForRange` read
+    /// from once they detect an actively-watching assistive-technology
+    /// client — normally VoiceOver. This module's passive, read-only AX
+    /// polling never triggers that, so on a fresh browser process every
+    /// selection read finds a real focused/hit-tested element but no
+    /// selection attributes on it, forever. Confirmed by live testing
+    /// 2026-07-12: Notes detected selections correctly on the first try;
+    /// Chrome and Notion (Electron) returned no selection on every attempt
+    /// across a multi-minute session, with `probe_selection`'s two lookups
+    /// both finding *an* element, just never one with selection data.
+    ///
+    /// The fix is Chromium's own documented escape hatch: setting
+    /// `AXManualAccessibility` to `true` forces full accessibility mode on
+    /// for that process, the same as if VoiceOver had started watching it.
+    /// **Where to set it matters and was wrong in the first attempt at this
+    /// fix**: setting it on the app-level `AXUIElementCreateApplication(pid)`
+    /// object returned `kAXErrorAttributeUnsupported` (-25205) from real
+    /// Chrome in live testing — Chrome's generic top-level Application
+    /// accessibility object doesn't implement this Chromium-specific
+    /// attribute at all. It has to be set on an element that actually lives
+    /// inside Chrome's own accessibility bridge — i.e. the exact
+    /// focused/hit-tested `AXUIElementRef` this function already has in hand
+    /// from `probe_selection`, before it's released. Native, non-Chromium
+    /// apps don't recognize this attribute on their elements either, and
+    /// `AXUIElementSetAttributeValue` just returns an error there too
+    /// (discarded) — so this is safe to attempt unconditionally on any
+    /// element this module ever failed to read a selection from; no
+    /// bundle-id/browser allowlist is needed.
+    ///
+    /// One real limitation even once this targets the right element:
+    /// activating the tree doesn't make it exist instantly. The very first
+    /// selection in a given browser process right after this fires may still
+    /// not produce a bubble; the tree populates in the background, and the
+    /// *next* selection in that same process should work, since the
+    /// activation (and the tree) persists for the process's lifetime — this
+    /// function only ever asks once per pid, on the first selection attempt
+    /// that comes up empty for it.
+    unsafe fn maybe_activate_manual_accessibility(element: AXUIElementRef) {
+        let mut pid: i32 = 0;
+        if AXUIElementGetPid(element, &mut pid) != AX_ERROR_SUCCESS || pid == 0 {
+            return;
+        }
+        {
+            let mut activated = AX_ACTIVATED_PIDS.lock().unwrap();
+            if activated.contains(&pid) {
+                return;
+            }
+            activated.push(pid);
+        }
+
+        let attr = match cfstring(AX_MANUAL_ACCESSIBILITY) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let err = AXUIElementSetAttributeValue(element, attr, kCFBooleanTrue);
         CFRelease(attr as CFTypeRef);
-        err == AX_ERROR_SUCCESS && settable != 0
+        crate::trace(&format!(
+            "selection_watcher::maybe_activate_manual_accessibility(mac): pid={pid} set AXManualAccessibility on found element -> err={err}"
+        ));
     }
 
     unsafe fn selection_from_element(
@@ -1440,6 +1927,90 @@ mod mac {
                 size: CGSize::default(),
             };
             assert_eq!(selection_anchor_from_rect(rect), (10.0, 20.0));
+        }
+
+        #[test]
+        fn frontmost_switch_clears_when_pid_differs_from_own_and_source() {
+            assert!(should_clear_for_frontmost_switch(100, 300, Some(200)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_for_own_pid() {
+            assert!(!should_clear_for_frontmost_switch(100, 300, Some(100)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_for_source_pid() {
+            // The steady state for the whole time the bubble is visible:
+            // show_bubble/show_bubble_menu deliberately don't steal
+            // foreground, so the source app (Safari, say) stays frontmost.
+            // This must NOT clear the bubble.
+            assert!(!should_clear_for_frontmost_switch(100, 300, Some(300)));
+        }
+
+        #[test]
+        fn frontmost_switch_does_not_clear_when_unknown() {
+            assert!(!should_clear_for_frontmost_switch(100, 300, None));
+        }
+
+        #[test]
+        fn editable_role_accepts_known_editable_browser_roles() {
+            assert!(is_editable_role("AXTextField"));
+            assert!(is_editable_role("AXTextArea"));
+            assert!(is_editable_role("AXComboBox"));
+            assert!(is_editable_role("AXSearchField"));
+        }
+
+        #[test]
+        fn editable_role_rejects_read_only_and_empty_roles() {
+            assert!(!is_editable_role(""));
+            assert!(!is_editable_role("AXStaticText"));
+            assert!(!is_editable_role("AXWebArea"));
+            assert!(!is_editable_role("AXGroup"));
+        }
+
+        #[test]
+        fn chromium_browser_bundle_id_accepts_supported_browser_families() {
+            for bundle_id in [
+                "com.google.Chrome",
+                "com.google.Chrome.beta",
+                "com.google.Chrome.dev",
+                "com.google.Chrome.canary",
+                "org.chromium.Chromium",
+                "com.microsoft.edgemac",
+                "com.microsoft.edgemac.Beta",
+                "com.brave.Browser",
+                "com.brave.Browser.nightly",
+                "company.thebrowser.Browser",
+                "com.vivaldi.Vivaldi",
+                "com.operasoftware.Opera",
+                "com.operasoftware.OperaGX",
+            ] {
+                assert!(
+                    is_chromium_browser_bundle_id(bundle_id),
+                    "expected {bundle_id} to be recognized"
+                );
+            }
+        }
+
+        #[test]
+        fn chromium_browser_bundle_id_rejects_native_unknown_and_electron_apps() {
+            for bundle_id in [
+                "",
+                "com.apple.Notes",
+                "com.apple.finder",
+                "com.apple.Safari",
+                "org.mozilla.firefox",
+                "notion.id",
+                "com.microsoft.VSCode",
+                "com.tinyspeck.slackmacgap",
+                "com.google.ChromeRemoteDesktopHost",
+            ] {
+                assert!(
+                    !is_chromium_browser_bundle_id(bundle_id),
+                    "expected {bundle_id} to be rejected"
+                );
+            }
         }
     }
 }

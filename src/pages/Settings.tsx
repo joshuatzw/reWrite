@@ -31,6 +31,7 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
   const [sent, setSent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [googleLoading, setGoogleLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,6 +46,18 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
       setError(String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleGoogleLogin() {
+    setGoogleLoading(true);
+    setError(null);
+    try {
+      await invoke("open_google_login");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setGoogleLoading(false);
     }
   }
 
@@ -79,7 +92,24 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
             </button>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <>
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={googleLoading}
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%", background: "var(--rw-bg-primary)", color: "var(--rw-text-primary)", border: "1px solid var(--rw-border)", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 600, cursor: googleLoading ? "not-allowed" : "pointer", fontFamily: "inherit" }}
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84c-.21 1.13-.84 2.09-1.8 2.73v2.27h2.9c1.7-1.56 2.68-3.87 2.68-6.64z" /><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.27c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.98v2.34C2.46 15.98 5.48 18 9 18z" /><path fill="#FBBC05" d="M3.95 10.7c-.18-.54-.28-1.11-.28-1.7s.1-1.16.28-1.7V4.96H.98A8.99 8.99 0 0 0 0 9c0 1.45.35 2.83.98 4.04l2.97-2.34z" /><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0 5.48 0 2.46 2.02.98 4.96l2.97 2.34C4.66 5.17 6.65 3.58 9 3.58z" /></svg>
+              {googleLoading ? "Opening…" : "Continue with Google"}
+            </button>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
+              <div style={{ flex: 1, height: 1, background: "var(--rw-border)" }} />
+              <span style={{ fontSize: 12.5, color: "var(--rw-text-muted)" }}>or</span>
+              <div style={{ flex: 1, height: 1, background: "var(--rw-border)" }} />
+            </div>
+
+            <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <input
               type="email"
               value={email}
@@ -96,7 +126,8 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
             >
               {loading ? "Sending…" : "Send magic link"}
             </button>
-          </form>
+            </form>
+          </>
         )}
       </div>
     </div>
@@ -244,8 +275,13 @@ function HomeView({ history, skillsConfig, config, authState, accessibilityGrant
 
 function HistoryItemRow({ entry }: { entry: HistoryEntry }) {
   const [hov, setHov] = useState(false);
-  const title = truncate(entry.input_text.split("\n")[0], 55) || "Untitled";
-  const preview = truncate(entry.output_text, 90);
+  const isMetadataOnly = !entry.input_text.trim() && !entry.output_text.trim();
+  const title = isMetadataOnly
+    ? "Synced rewrite"
+    : truncate(entry.input_text.split("\n")[0], 55) || "Untitled";
+  const preview = isMetadataOnly
+    ? "Text stays on the original device"
+    : truncate(entry.output_text, 90);
   const timeStr = formatTime(entry.timestamp_ms);
   const words = `${entry.output_word_count} word${entry.output_word_count !== 1 ? "s" : ""}`;
 
@@ -256,7 +292,7 @@ function HistoryItemRow({ entry }: { entry: HistoryEntry }) {
       style={{
         display: "flex", alignItems: "center", gap: 18,
         background: "var(--rw-bg-primary)", border: `1px solid ${hov ? "var(--rw-border-hover)" : "var(--rw-border)"}`,
-        borderRadius: 13, padding: "17px 20px", cursor: "pointer",
+        borderRadius: 13, padding: "17px 20px", cursor: isMetadataOnly ? "default" : "pointer",
         transition: "border-color .14s, box-shadow .14s",
         boxShadow: hov ? "0 3px 10px rgba(20,20,26,.05)" : "none",
       }}
@@ -500,17 +536,23 @@ function SkillsLockedView() {
 }
 
 function SkillsView() {
-  const [config, setConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
+  const [config, setConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
   const [showCreate, setShowCreate] = useState(false);
   const [editingSkill, setEditingSkill] = useState<Skill | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadSkills = useCallback(() => {
     invoke<SkillsConfig>("get_skills_config").then((cfg) => {
       setConfig({ ...cfg, skills: [...cfg.skills].sort((a, b) => a.order - b.order) });
     });
   }, []);
+
+  useEffect(() => {
+    loadSkills();
+    const unlisten = listen("skills:updated", loadSkills);
+    return () => { unlisten.then((fn) => fn()); };
+  }, [loadSkills]);
 
   function isBuiltinEnabled(id: string): boolean {
     return config.builtin_enabled[id] !== false;
@@ -653,7 +695,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
   const [hotkey, setHotkey] = useState("ctrl+shift+r");
   const [superHotkey, setSuperHotkey] = useState("ctrl+shift+period");
   const [defaultSkillId, setDefaultSkillId] = useState("__proofread__");
-  const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
+  const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
 
   const [editingHotkey, setEditingHotkey] = useState(false);
   const [newHotkey, setNewHotkey] = useState("");
@@ -684,7 +726,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
   const newHotkeyRef = useRef<HTMLInputElement>(null);
   const newSuperHotkeyRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  const loadPreferences = useCallback(() => {
     invoke<Config>("get_config").then((cfg) => {
       setHotkey(cfg.hotkey);
       setSuperHotkey(cfg.super_hotkey);
@@ -693,8 +735,14 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
       setFullConfig(cfg);
     });
     invoke<SkillsConfig>("get_skills_config").then(setSkillsConfig);
-    getVersion().then(setAppVersion);
   }, []);
+
+  useEffect(() => {
+    loadPreferences();
+    getVersion().then(setAppVersion);
+    const unlisten = listen("skills:updated", loadPreferences);
+    return () => { unlisten.then((fn) => fn()); };
+  }, [loadPreferences]);
 
   async function handleCheckForUpdates() {
     setUpdateStatus("checking");
@@ -978,7 +1026,7 @@ function SettingsView({ authState, onLogout }: { authState: AuthState; onLogout:
 export default function Settings() {
   const [active, setActive] = useState<ActiveView>("home");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {} });
+  const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
   const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400, bubble_enabled: true });
   const [authState, setAuthState] = useState<AuthState | null>(null);
 
@@ -1045,6 +1093,27 @@ export default function Settings() {
       unlistenNav.then((fn) => fn());
     };
   }, [navigateTo]);
+
+  useEffect(() => {
+    const reloadHistory = () => {
+      invoke<HistoryEntry[]>("get_history").then(setHistory);
+    };
+    const reloadSkills = () => {
+      Promise.all([
+        invoke<SkillsConfig>("get_skills_config"),
+        invoke<Config>("get_config"),
+      ]).then(([skills, appConfig]) => {
+        setSkillsConfig(skills);
+        setConfig(appConfig);
+      });
+    };
+    const unlistenHistory = listen("history:updated", reloadHistory);
+    const unlistenSkills = listen("skills:updated", reloadSkills);
+    return () => {
+      unlistenHistory.then((fn) => fn());
+      unlistenSkills.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const blockContextMenu = (e: MouseEvent) => e.preventDefault();

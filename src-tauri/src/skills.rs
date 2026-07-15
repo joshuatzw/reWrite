@@ -20,7 +20,7 @@ pub struct Skill {
     pub base_skill_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default)]
     pub global_instructions: String,
@@ -29,6 +29,25 @@ pub struct SkillsConfig {
     /// Tracks which built-in skills are enabled; absent key = enabled (true)
     #[serde(default)]
     pub builtin_enabled: HashMap<String, bool>,
+    /// Kept in this blob (and mirrored to config.toml) so only the default
+    /// skill preference, not unrelated app settings, follows the account.
+    #[serde(default = "default_skill_id")]
+    pub default_skill_id: String,
+}
+
+fn default_skill_id() -> String {
+    "__proofread__".to_string()
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            global_instructions: String::new(),
+            skills: Vec::new(),
+            builtin_enabled: HashMap::new(),
+            default_skill_id: default_skill_id(),
+        }
+    }
 }
 
 pub fn new_id() -> String {
@@ -51,6 +70,55 @@ pub fn save(config: &SkillsConfig, path: &Path) -> Result<()> {
     }
     fs::write(path, serde_json::to_string_pretty(config)?)?;
     Ok(())
+}
+
+pub fn file_has_default_skill_id(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|value| value.get("default_skill_id").cloned())
+        .is_some()
+}
+
+fn updated_at_path(path: &Path) -> std::path::PathBuf {
+    path.with_file_name("skills_updated_at_ms")
+}
+
+/// The logical edit time used by cloud last-write-wins. A sidecar avoids
+/// treating a cloud adoption's local file write as a newer user edit.
+pub fn load_updated_at_ms(path: &Path) -> i64 {
+    fs::read_to_string(updated_at_path(path))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .or_else(|| {
+            fs::metadata(path)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as i64)
+        })
+        .unwrap_or(0)
+}
+
+pub fn next_updated_at_ms(path: &Path) -> i64 {
+    crate::history::now_ms().max(load_updated_at_ms(path).saturating_add(1))
+}
+
+pub fn save_updated_at_ms(path: &Path, updated_at_ms: i64) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(updated_at_path(path), updated_at_ms.to_string())?;
+    Ok(())
+}
+
+pub fn save_local_edit(config: &SkillsConfig, path: &Path) -> Result<i64> {
+    let updated_at_ms = next_updated_at_ms(path);
+    save(config, path)?;
+    save_updated_at_ms(path, updated_at_ms)?;
+    Ok(updated_at_ms)
 }
 
 pub fn builtin_display_name(id: &str) -> Option<&'static str> {

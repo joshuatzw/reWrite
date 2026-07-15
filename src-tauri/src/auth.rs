@@ -3,11 +3,22 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const SUPABASE_URL: &str = "https://jrzcedtyqyzfqbfuabxa.supabase.co";
+
+/// Hosted landing page that both Google OAuth and magic-link redirect to after
+/// auth. It renders a success state in the browser, then re-dispatches the
+/// `#access_token=...` fragment to the app via the `rewrite://auth` deep link
+/// (Supabase can't serve renderable HTML from its own origin, and the implicit
+/// flow's token lives in the URL fragment, so the bounce must be client-side).
+pub const AUTH_REDIRECT_URL: &str = "https://www.rewriteai.dev/auth/success";
 pub const SUPABASE_ANON_KEY: &str =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpyemNlZHR5cXl6ZnFiZnVhYnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzNjk2ODUsImV4cCI6MjA5Nzk0NTY4NX0.Qe5HCqlmP8z--ZsI3w8uw1QtMF60udrWV7XsuT9Lay4";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
+    /// Stable Supabase auth.users UUID. Empty only while upgrading a session
+    /// written by an older app version; sync resolves and persists it before use.
+    #[serde(default)]
+    pub user_id: String,
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
@@ -138,6 +149,7 @@ pub async fn refresh_session(
         .unwrap_or_else(|| now_secs() + r.expires_in.unwrap_or(3600));
 
     Ok(AuthSession {
+        user_id: session.user_id,
         access_token: r.access_token,
         refresh_token: r.refresh_token,
         expires_at,
@@ -188,7 +200,7 @@ pub async fn send_magic_link(client: &reqwest::Client, email: &str) -> Result<()
         .post(format!("{SUPABASE_URL}/auth/v1/otp"))
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Content-Type", "application/json")
-        .query(&[("redirect_to", "rewrite://auth")])
+        .query(&[("redirect_to", AUTH_REDIRECT_URL)])
         .json(&serde_json::json!({ "email": email }))
         .send()
         .await?;
@@ -201,23 +213,54 @@ pub async fn send_magic_link(client: &reqwest::Client, email: &str) -> Result<()
     Ok(())
 }
 
+// ── Google OAuth ──────────────────────────────────────────────────────────────
+
+/// Supabase's Google OAuth (implicit flow) authorize URL. Redirects to the
+/// hosted `AUTH_REDIRECT_URL` success page, which bounces the
+/// `#access_token=...&refresh_token=...` fragment back to the app via the
+/// `rewrite://auth` deep link — so the deep-link handler and `parse_auth_url`
+/// need no changes.
+pub fn google_login_url() -> String {
+    let mut url = reqwest::Url::parse(&format!("{SUPABASE_URL}/auth/v1/authorize"))
+        .expect("authorize URL is a valid, hard-coded base");
+    url.query_pairs_mut()
+        .append_pair("provider", "google")
+        .append_pair("redirect_to", AUTH_REDIRECT_URL);
+    url.into()
+}
+
 // ── User info ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct UserResponse {
-    email: Option<String>,
+pub struct AuthUser {
+    pub id: String,
+    pub email: Option<String>,
 }
 
-pub async fn get_user_email(client: &reqwest::Client, access_token: &str) -> Result<String> {
+pub async fn get_user(client: &reqwest::Client, access_token: &str) -> Result<AuthUser> {
     let resp = client
         .get(format!("{SUPABASE_URL}/auth/v1/user"))
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Authorization", format!("Bearer {access_token}"))
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?;
 
-    let user: UserResponse = resp.json().await?;
-    user.email
+    if !resp.status().is_success() {
+        return Err(anyhow!("Get user failed: {}", resp.status()));
+    }
+
+    let user: AuthUser = resp.json().await?;
+    if user.id.is_empty() {
+        return Err(anyhow!("No id in user response"));
+    }
+    Ok(user)
+}
+
+pub async fn get_user_email(client: &reqwest::Client, access_token: &str) -> Result<String> {
+    get_user(client, access_token)
+        .await?
+        .email
         .ok_or_else(|| anyhow!("No email in user response"))
 }
 
