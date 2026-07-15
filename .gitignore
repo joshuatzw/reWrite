@@ -17,6 +17,9 @@ dist-ssr
 .env.*
 supabase/.temp/
 
+# Internal planning/spec docs (kept local, out of GitHub)
+.project/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
