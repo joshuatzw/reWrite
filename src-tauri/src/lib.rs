@@ -2018,6 +2018,20 @@ pub fn run() {
                 BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
                 BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
             )
+            // Build the window already shown but parked far off-screen at the
+            // shared park sentinel (see BUBBLE_MENU_PARKED_X/Y and the sibling
+            // bubble_menu builder just below, which warms itself the exact same
+            // way). A window built `.visible(false)` keeps its webview content
+            // cold — the engine defers loading/painting the page until the
+            // window is first shown — so the very first real `show_bubble`
+            // would otherwise be the cold first paint, briefly flashing a
+            // transparent/half-rendered frame before Bubble.tsx draws the ring.
+            // Showing it off-screen at startup forces that first load+paint out
+            // of sight; `show_bubble` then just moves the already-warm window
+            // on-screen, and `hide_bubble` hides it (the webview stays warm
+            // across later hide/show). The next real show re-positions it, so
+            // the off-screen parking stays invisible.
+            .position(BUBBLE_MENU_PARKED_X, BUBBLE_MENU_PARKED_Y)
             .focused(false)
             // Without this, macOS treats a click on this (deliberately
             // unfocused, so it doesn't steal focus from the source app)
@@ -2026,7 +2040,7 @@ pub fn run() {
             // clicking it does nothing. This is Tauri/wry's wrapper around
             // `NSWindow.acceptsFirstMouse`; harmless on non-macOS targets.
             .accept_first_mouse(true)
-            .visible(false)
+            .visible(true)
             .build()
             {
                 let bubble_ref = bubble.clone();

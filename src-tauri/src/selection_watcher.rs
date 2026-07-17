@@ -640,10 +640,24 @@ mod mac {
     /// `maybe_activate_frontmost_application`.
     const AX_ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
     /// Current Chromium deliberately debounces `AXEnhancedUserInterface` for
-    /// two seconds on macOS Sonoma+ before enabling complete accessibility.
-    /// Re-probe after three seconds so the renderer also has time to publish
-    /// its newly-enabled web tree, without blocking the event-tap or worker.
-    const APPLICATION_ACTIVATION_REPROBE_DELAY: Duration = Duration::from_secs(3);
+    /// two seconds on macOS Sonoma+ before enabling complete accessibility,
+    /// and Electron's `AXManualAccessibility` tree populates on its own
+    /// asynchronous schedule too. A single fixed-delay re-probe either lands
+    /// before the tree is ready (permanently missing that selection, since
+    /// nothing else re-probes it) or wastes time waiting past when the tree
+    /// was actually ready. Instead, re-probe several times at increasing
+    /// delays — an early hit stops the schedule immediately at the next
+    /// message drain (see `worker_loop`'s inner `recv_timeout` loop, which
+    /// collapses redundant back-to-back `Recheck`s into a single probe), and
+    /// a late-populating tree still gets caught by a later attempt. None of
+    /// these sleeps happen on the event-tap or worker thread — see
+    /// `schedule_activation_reprobe`.
+    const APPLICATION_ACTIVATION_REPROBE_SCHEDULE: [Duration; 4] = [
+        Duration::from_millis(150),
+        Duration::from_millis(400),
+        Duration::from_millis(900),
+        Duration::from_millis(2000),
+    ];
 
     type AXError = i32;
     type AXValueType = u32;
@@ -1567,13 +1581,34 @@ mod mac {
     struct ApplicationActivation {
         pid: i32,
         kind: ApplicationActivationKind,
+        attempts: u32,
     }
 
     /// One entry per frontmost main application pid attempted during this
     /// watcher lifetime. Successful entries are balanced back to `false` by
     /// `deactivate_frontmost_applications` on stop; unsupported entries are
-    /// retained only to avoid retrying/logging on every selection probe.
+    /// retried up to `MAX_ACTIVATION_ATTEMPTS_PER_PID` times (see
+    /// `should_attempt_activation`) rather than being retried forever or
+    /// locked out after one try.
     static AX_APPLICATION_ACTIVATIONS: Mutex<Vec<ApplicationActivation>> = Mutex::new(Vec::new());
+
+    /// Small bound on redundant activation attempts per pid, shared by both
+    /// `AX_APPLICATION_ACTIVATIONS` and `AX_ACTIVATED_PIDS`. A single failed
+    /// attempt — e.g. one made while the target process's AX bridge was
+    /// still initializing — previously left that pid locked out for the rest
+    /// of the watcher's lifetime, with no way to recover even though a later
+    /// attempt against the same still-running process might well succeed.
+    /// Capped, rather than unbounded, so a process that genuinely never
+    /// supports either attribute doesn't get probed on every single
+    /// selection for its whole lifetime.
+    const MAX_ACTIVATION_ATTEMPTS_PER_PID: u32 = 3;
+
+    /// Pure decision behind the retry cap above: whether a pid already
+    /// attempted `attempts` times may be attempted again. Split out so it's
+    /// directly unit-testable — see `mod tests` below.
+    fn should_attempt_activation(attempts: u32) -> bool {
+        attempts < MAX_ACTIVATION_ATTEMPTS_PER_PID
+    }
 
     /// Chromium browser application bundle ids allowed to receive the strong
     /// `AXEnhancedUserInterface` signal. Electron apps deliberately are not in
@@ -1614,8 +1649,11 @@ mod mac {
     /// The mutex covers the attempt as well as the bookkeeping. Combined with
     /// the `STOP_REQUESTED` checks, this prevents a probe already in flight
     /// from setting an application back to true just after watcher teardown.
-    /// Returns true only for the first successful activation of this pid, so
-    /// the caller schedules exactly one delayed re-probe and no thread storm.
+    /// Returns true only for the first successful activation of this pid —
+    /// including a success that lands on a bounded retry after earlier
+    /// unsupported attempts (see `should_attempt_activation`) — so the
+    /// caller schedules exactly one delayed re-probe sequence and no thread
+    /// storm. A pid that has already succeeded is never retried.
     unsafe fn maybe_activate_frontmost_application(
         application: AXUIElementRef,
         pid: i32,
@@ -1626,7 +1664,15 @@ mod mac {
         }
 
         let mut activations = AX_APPLICATION_ACTIVATIONS.lock().unwrap();
-        if activations.iter().any(|activation| activation.pid == pid)
+        let previous = activations
+            .iter()
+            .find(|activation| activation.pid == pid)
+            .map(|activation| (activation.kind, activation.attempts));
+        let already_succeeded = previous
+            .is_some_and(|(kind, _)| !matches!(kind, ApplicationActivationKind::Unsupported));
+        let attempts_so_far = previous.map(|(_, attempts)| attempts).unwrap_or(0);
+        if already_succeeded
+            || !should_attempt_activation(attempts_so_far)
             || STOP_REQUESTED.load(Ordering::SeqCst)
         {
             return false;
@@ -1661,7 +1707,14 @@ mod mac {
             (None, ApplicationActivationKind::Unsupported)
         };
 
-        activations.push(ApplicationActivation { pid, kind });
+        let attempts = attempts_so_far + 1;
+        match activations.iter_mut().find(|activation| activation.pid == pid) {
+            Some(existing) => {
+                existing.kind = kind;
+                existing.attempts = attempts;
+            }
+            None => activations.push(ApplicationActivation { pid, kind, attempts }),
+        }
         let enhanced_result = enhanced_err
             .map(|err| format!("err={err}"))
             .unwrap_or_else(|| "not attempted".to_string());
@@ -1673,17 +1726,27 @@ mod mac {
     }
 
     /// Chrome does not enable its web accessibility tree immediately after
-    /// accepting AXEnhancedUserInterface. Sleep on a short-lived helper thread,
-    /// never on the event-tap or selection worker, then enqueue one ordinary
-    /// recheck. If the watcher stopped/restarted meanwhile, this sender belongs
-    /// to the old disconnected channel and the send simply fails.
+    /// accepting AXEnhancedUserInterface, and the tree can finish warming up
+    /// at any point along a range of delays rather than one fixed instant.
+    /// Sleep on a single short-lived helper thread, never on the event-tap or
+    /// selection worker, walking `APPLICATION_ACTIVATION_REPROBE_SCHEDULE` in
+    /// order and enqueuing one ordinary recheck after each sleep. Capturing
+    /// `tx` once up front (the same `NOTIFY_TX` clone the old one-shot
+    /// version captured) means a watcher stop()/restart() in the middle of
+    /// this schedule harmlessly disconnects the channel: the next `send`
+    /// fails and the loop exits immediately instead of sleeping through the
+    /// rest of the schedule for no reason.
     fn schedule_activation_reprobe() {
         let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref().cloned() else {
             return;
         };
         std::thread::spawn(move || {
-            std::thread::sleep(APPLICATION_ACTIVATION_REPROBE_DELAY);
-            let _ = tx.send(WorkerMsg::Recheck);
+            for delay in APPLICATION_ACTIVATION_REPROBE_SCHEDULE {
+                std::thread::sleep(delay);
+                if tx.send(WorkerMsg::Recheck).is_err() {
+                    break;
+                }
+            }
         });
     }
 
@@ -1719,12 +1782,13 @@ mod mac {
         }
     }
 
-    /// PIDs already sent the `AXManualAccessibility` activation below. Never
-    /// evicted: once a process has been asked, asking again is a harmless
-    /// no-op, so there's no need to clean this up e.g. when a browser quits —
-    /// a reused pid from a long-exited process just gets one redundant,
-    /// harmless attempt.
-    static AX_ACTIVATED_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+    /// `(pid, attempt count)` pairs for pids sent the `AXManualAccessibility`
+    /// activation below. Never evicted: once a process has exhausted its
+    /// attempts (see `should_attempt_activation`/`MAX_ACTIVATION_ATTEMPTS_PER_PID`),
+    /// asking again is a harmless no-op, so there's no need to clean this up
+    /// e.g. when a browser quits — a reused pid from a long-exited process
+    /// just gets a few redundant, harmless attempts at most.
+    static AX_ACTIVATED_PIDS: Mutex<Vec<(i32, u32)>> = Mutex::new(Vec::new());
 
     /// Chromium-based apps (Chrome, Edge, Brave, Arc, Vivaldi, and Electron
     /// apps like VS Code/Notion) only populate the full accessibility tree
@@ -1763,8 +1827,10 @@ mod mac {
     /// not produce a bubble; the tree populates in the background, and the
     /// *next* selection in that same process should work, since the
     /// activation (and the tree) persists for the process's lifetime — this
-    /// function only ever asks once per pid, on the first selection attempt
-    /// that comes up empty for it.
+    /// function asks up to `MAX_ACTIVATION_ATTEMPTS_PER_PID` times per pid,
+    /// once per selection attempt that comes up empty for it, so a first
+    /// attempt made while the process's AX bridge was still cold gets a few
+    /// more chances instead of a permanent lockout.
     unsafe fn maybe_activate_manual_accessibility(element: AXUIElementRef) {
         let mut pid: i32 = 0;
         if AXUIElementGetPid(element, &mut pid) != AX_ERROR_SUCCESS || pid == 0 {
@@ -1772,10 +1838,15 @@ mod mac {
         }
         {
             let mut activated = AX_ACTIVATED_PIDS.lock().unwrap();
-            if activated.contains(&pid) {
-                return;
+            match activated.iter_mut().find(|(activated_pid, _)| *activated_pid == pid) {
+                Some((_, attempts)) => {
+                    if !should_attempt_activation(*attempts) {
+                        return;
+                    }
+                    *attempts += 1;
+                }
+                None => activated.push((pid, 1)),
             }
-            activated.push(pid);
         }
 
         let attr = match cfstring(AX_MANUAL_ACCESSIBILITY) {
@@ -1787,6 +1858,25 @@ mod mac {
         crate::trace(&format!(
             "selection_watcher::maybe_activate_manual_accessibility(mac): pid={pid} set AXManualAccessibility on found element -> err={err}"
         ));
+    }
+
+    /// Pure decision behind the zero-rect fallback in `selection_from_element`:
+    /// given the last recorded left-mouse-up point, build a zero-size `CGRect`
+    /// anchored there, or `None` if there's no usable point yet (both
+    /// coordinates still at the atomics' initial/unset value of 0.0 — see
+    /// `LAST_MOUSE_UP_X`/`LAST_MOUSE_UP_Y`). `selection_anchor_from_rect`
+    /// turns a zero-size rect at `(x, y)` into exactly `(x, y)`, so this
+    /// anchors the bubble at the mouse-up point instead of at AX bounds.
+    /// Split out (and kept free of the atomic reads themselves) so it's
+    /// directly unit-testable — see `mod tests` below.
+    fn mouse_up_anchor_rect(x: f64, y: f64) -> Option<CGRect> {
+        if x == 0.0 && y == 0.0 {
+            return None;
+        }
+        Some(CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize::default(),
+        })
     }
 
     unsafe fn selection_from_element(
@@ -1809,12 +1899,27 @@ mod mac {
             return Ok(None);
         }
 
-        let Some(rect) = selected_range_bounds(element)? else {
-            return Ok(None);
+        // During Chromium/Electron's asynchronous AX-tree warm-up (see
+        // `maybe_activate_manual_accessibility`/`schedule_activation_reprobe`),
+        // `AXSelectedText` can already read correctly while
+        // `AXBoundsForRange` is still transiently empty (missing entirely, or
+        // a real-but-zero-size rect). Previously that discarded a selection
+        // whose *text* was read fine. Instead, fall back to anchoring at the
+        // last mouse-up point — mirrors the Windows backend's tolerance for
+        // an imprecise anchor over no bubble at all. Only take this path when
+        // there's a usable mouse-up point; otherwise keep discarding, same as
+        // before.
+        let rect = match selected_range_bounds(element)? {
+            Some(rect) if rect.size.width > 0.0 && rect.size.height > 0.0 => rect,
+            _ => {
+                let x = f64::from_bits(LAST_MOUSE_UP_X.load(Ordering::Relaxed));
+                let y = f64::from_bits(LAST_MOUSE_UP_Y.load(Ordering::Relaxed));
+                match mouse_up_anchor_rect(x, y) {
+                    Some(rect) => rect,
+                    None => return Ok(None),
+                }
+            }
         };
-        if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
-            return Ok(None);
-        }
         Ok(Some((text, rect)))
     }
 
@@ -2011,6 +2116,46 @@ mod mac {
                     "expected {bundle_id} to be rejected"
                 );
             }
+        }
+
+        #[test]
+        fn mouse_up_anchor_rect_none_when_point_unset() {
+            assert!(mouse_up_anchor_rect(0.0, 0.0).is_none());
+        }
+
+        #[test]
+        fn mouse_up_anchor_rect_zero_size_at_point_when_usable() {
+            let rect = mouse_up_anchor_rect(120.0, 340.0).expect("usable point");
+            assert_eq!(rect.origin.x, 120.0);
+            assert_eq!(rect.origin.y, 340.0);
+            assert_eq!(rect.size.width, 0.0);
+            assert_eq!(rect.size.height, 0.0);
+            // A zero-size rect at (x, y) must resolve to exactly (x, y),
+            // matching selection_from_element's intent of anchoring the
+            // bubble at the mouse-up point.
+            assert_eq!(selection_anchor_from_rect(rect), (120.0, 340.0));
+        }
+
+        #[test]
+        fn mouse_up_anchor_rect_usable_when_only_one_axis_nonzero() {
+            // Only "both still 0.0" (the atomics' unset state) should count
+            // as unusable — a point sitting exactly on one screen edge (x==0
+            // or y==0) is still a real point.
+            assert!(mouse_up_anchor_rect(0.0, 50.0).is_some());
+            assert!(mouse_up_anchor_rect(50.0, 0.0).is_some());
+        }
+
+        #[test]
+        fn activation_attempts_allowed_below_cap() {
+            assert!(should_attempt_activation(0));
+            assert!(should_attempt_activation(1));
+            assert!(should_attempt_activation(MAX_ACTIVATION_ATTEMPTS_PER_PID - 1));
+        }
+
+        #[test]
+        fn activation_attempts_blocked_at_and_above_cap() {
+            assert!(!should_attempt_activation(MAX_ACTIVATION_ATTEMPTS_PER_PID));
+            assert!(!should_attempt_activation(MAX_ACTIVATION_ATTEMPTS_PER_PID + 5));
         }
     }
 }
