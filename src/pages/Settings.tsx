@@ -7,7 +7,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import type { Config, HistoryEntry, Skill, SkillsConfig } from "../types";
 import { BUILTIN_SKILLS } from "../skills";
 import logoBlack from "../assets/rewrite_logo_black.png";
-import type { ActiveView, AuthState } from "./settingsTypes";
+import type { ActiveView, AuthState, Plan, UpgradeRequest } from "./settingsTypes";
 import { ACCENT, BUILTIN_SKILL_OPTIONS, FREE_TIER_MONTHLY_LIMIT } from "./settingsConstants";
 import { IconLock, IconPencil, Sidebar, Toggle } from "./settingsComponents";
 import { AccessibilityView } from "./AccessibilityView";
@@ -29,7 +29,7 @@ import {
 
 // ── Login view ────────────────────────────────────────────────────────────────
 
-function LoginView({ onLogin }: { onLogin: () => void }) {
+function LoginView({ onLogin, notice }: { onLogin: () => void; notice?: string }) {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -80,6 +80,14 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
           <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 26, fontWeight: 700, color: "var(--rw-text-primary)", marginBottom: 8 }}>Welcome to reWrite</h2>
           <p style={{ fontSize: 14.5, color: "var(--rw-text-muted)" }}>Enter your email to sign in or create an account.</p>
         </div>
+
+        {/* Set when the user got here from an upgrade deep link, so the
+            sign-in step reads as a stop along the way rather than a dead end. */}
+        {notice && (
+          <div style={{ fontSize: 13.5, color: "var(--rw-text-secondary)", background: "var(--rw-bg-subtle)", border: "1px solid var(--rw-border)", borderRadius: 10, padding: "11px 14px", marginBottom: 22, lineHeight: 1.45 }}>
+            {notice}
+          </div>
+        )}
 
         {sent ? (
           <div style={{ textAlign: "center", padding: "24px 0" }}>
@@ -549,6 +557,111 @@ function SkillModal({ skill, allSkills, onSave, onClose, error }: { skill: Skill
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Upgrade dialog ────────────────────────────────────────────────────────────
+
+const PLAN_LABEL: Record<Plan, string> = { pro: "Pro", max: "Max" };
+
+/// Where a `rewrite://upgrade` deep link lands the user.
+///
+/// Deliberately a dialog layered over the current view rather than a
+/// navigation: the user could be mid-way through writing a custom skill or
+/// renaming a hotkey, and switching `active` would unmount that view and throw
+/// the draft away. Nothing unmounts here, so the upgrade can be dismissed and
+/// the half-finished work is still sitting there underneath.
+function UpgradeDialog({ request, authState, onClose }: { request: UpgradeRequest; authState: AuthState; onClose: () => void }) {
+  const [selected, setSelected] = useState<Plan | null>(request.plan);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const currentPlan = authState.is_subscribed ? authState.plan : null;
+  // The plan the link asked for is one they're already paying for. Say so
+  // rather than sending them into a second checkout for the same thing.
+  const alreadyOnSelected = selected !== null && selected === currentPlan;
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  async function handleContinue() {
+    if (!selected || alreadyOnSelected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Checkout opens in the browser; the result comes back over
+      // `rewrite://checkout-success`, which re-syncs the subscription from the
+      // server. Nothing here grants anything.
+      await invoke("open_checkout", { plan: selected });
+      onClose();
+    } catch (err) {
+      setError(String(err));
+      setBusy(false);
+    }
+  }
+
+  function PlanOption({ plan }: { plan: Plan }) {
+    const isSelected = selected === plan;
+    const isCurrent = currentPlan === plan;
+    return (
+      <button
+        type="button"
+        onClick={() => setSelected(plan)}
+        style={{ flex: 1, textAlign: "left", background: isSelected ? "var(--rw-bg-subtle)" : "var(--rw-bg-primary)", border: `1.5px solid ${isSelected ? "var(--rw-accent)" : "var(--rw-border)"}`, borderRadius: 12, padding: "16px 18px", cursor: "pointer", fontFamily: "inherit" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <span style={{ fontSize: 16, fontWeight: 600, color: "var(--rw-text-primary)" }}>reWrite {PLAN_LABEL[plan]}</span>
+          {isCurrent && (
+            <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: .5, textTransform: "uppercase", color: "var(--rw-text-secondary)", background: "var(--rw-bg-subtle)", border: "1px solid var(--rw-border)", padding: "3px 7px", borderRadius: 6 }}>
+              Current
+            </span>
+          )}
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--rw-text-muted)", marginTop: 5, lineHeight: 1.45 }}>
+          Unlimited rewrites and custom skills.
+        </div>
+      </button>
+    );
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--rw-modal-backdrop)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--rw-bg-primary)", borderRadius: 16, padding: 28, width: 500, boxShadow: "0 20px 60px rgba(0,0,0,.2)" }}>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 600, color: "var(--rw-text-primary)" }}>
+          {selected ? `Upgrade to ${PLAN_LABEL[selected]}` : "Choose a plan"}
+        </div>
+        <p style={{ fontSize: 14, color: "var(--rw-text-muted)", marginTop: 7, lineHeight: 1.5 }}>
+          {alreadyOnSelected
+            ? `You're already on reWrite ${PLAN_LABEL[selected!]} — nothing to pay for. Use Manage billing to change or cancel your plan.`
+            : "Checkout opens in your browser. Your plan updates here as soon as payment goes through."}
+        </p>
+
+        <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
+          <PlanOption plan="pro" />
+          <PlanOption plan="max" />
+        </div>
+
+        {error && <div style={{ fontSize: 12.5, color: "var(--rw-danger)", marginTop: 14 }}>{error}</div>}
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 22 }}>
+          <button type="button" onClick={onClose} style={{ fontSize: 13.5, color: "var(--rw-text-muted)", background: "var(--rw-bg-subtle)", border: "1px solid var(--rw-border)", borderRadius: 9, padding: "10px 18px", cursor: "pointer", fontFamily: "inherit" }}>
+            {alreadyOnSelected ? "Close" : "Not now"}
+          </button>
+          {alreadyOnSelected ? (
+            <button type="button" onClick={() => { invoke("open_billing_portal"); onClose(); }} style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-on-accent)", background: "var(--rw-accent)", border: "none", borderRadius: 9, padding: "10px 18px", cursor: "pointer", fontFamily: "inherit" }}>
+              Manage billing
+            </button>
+          ) : (
+            <button type="button" onClick={handleContinue} disabled={!selected || busy} style={{ fontSize: 13.5, fontWeight: 600, color: "var(--rw-on-accent)", background: selected && !busy ? "var(--rw-accent)" : "var(--rw-text-faint)", border: "none", borderRadius: 9, padding: "10px 18px", cursor: selected && !busy ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+              {busy ? "Opening…" : "Continue to checkout"}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1109,6 +1222,10 @@ export default function Settings() {
   const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
   const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400, bubble_enabled: true });
   const [authState, setAuthState] = useState<AuthState | null>(null);
+  // A pending `rewrite://upgrade` click. Held here rather than acted on
+  // immediately because the user may not be signed in yet — see the render
+  // gate below, where it survives the trip through LoginView.
+  const [upgradeRequest, setUpgradeRequest] = useState<UpgradeRequest | null>(null);
 
   // Accessibility permission (macOS Phase 2 onboarding, see roadmap-mac.md).
   // `check_accessibility_permission` always resolves `true` on non-macOS, so
@@ -1173,6 +1290,25 @@ export default function Settings() {
       unlistenNav.then((fn) => fn());
     };
   }, [navigateTo]);
+
+  // "Upgrade to Pro/Max" clicked on the website, delivered as a
+  // `rewrite://upgrade` deep link. Two arrival paths, because the app may have
+  // been closed when the user clicked:
+  //   - cold start — the link is handled during Rust `setup`, before this
+  //     webview exists, so any event it emitted is long gone. The drain on
+  //     mount is what recovers it.
+  //   - already running — the UI is listening, so `upgrade:requested` fires.
+  // Both go through the same take-once command, so only one of them can win
+  // and a single click never opens two dialogs.
+  useEffect(() => {
+    const drain = async () => {
+      const pending = await invoke<UpgradeRequest | null>("take_pending_upgrade");
+      if (pending) setUpgradeRequest(pending);
+    };
+    drain();
+    const unlistenUpgrade = listen("upgrade:requested", drain);
+    return () => { unlistenUpgrade.then((fn) => fn()); };
+  }, []);
 
   useEffect(() => {
     const reloadHistory = () => {
@@ -1257,8 +1393,17 @@ export default function Settings() {
   // known, or a flash of the Accessibility nav item on Windows).
   if (authState === null || accessibilityGranted === null || isMacos === null) return null;
 
-  // Not logged in
-  if (!authState.logged_in) return <LoginView onLogin={loadAuthState} />;
+  // Not logged in. Any pending upgrade stays parked in state while this
+  // renders — LoginView is a child, so nothing here unmounts the root — and
+  // the dialog below picks it up, plan intact, the moment sign-in lands.
+  if (!authState.logged_in) {
+    return (
+      <LoginView
+        onLogin={loadAuthState}
+        notice={upgradeRequest ? "Sign in first — we'll take you straight to checkout." : undefined}
+      />
+    );
+  }
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", fontFamily: "'Hanken Grotesk', system-ui, sans-serif", background: "var(--rw-bg-secondary)" }}>
@@ -1279,6 +1424,16 @@ export default function Settings() {
           />
         )}
       </main>
+
+      {/* Layered over whatever view is active, rather than navigating to one,
+          so an in-progress skill draft or hotkey edit underneath survives. */}
+      {upgradeRequest && (
+        <UpgradeDialog
+          request={upgradeRequest}
+          authState={authState}
+          onClose={() => setUpgradeRequest(null)}
+        />
+      )}
     </div>
   );
 }

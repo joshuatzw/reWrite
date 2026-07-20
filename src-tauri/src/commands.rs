@@ -819,6 +819,18 @@ pub async fn open_checkout(
         .map_err(|e| e.to_string())
 }
 
+/// Drains the upgrade requested by a `rewrite://upgrade` deep link, if any.
+///
+/// Take-once by design: the Settings UI reaches this from two paths — a
+/// mount-time drain (cold start, where the link beat the webview) and an
+/// `upgrade:requested` listener (app already running) — and whichever arrives
+/// first wins while the other sees `None`. That's what keeps one click from
+/// opening two checkouts.
+#[tauri::command]
+pub fn take_pending_upgrade(state: State<AppState>) -> Option<crate::UpgradeRequest> {
+    state.pending_upgrade.lock().unwrap().take()
+}
+
 #[tauri::command]
 pub async fn open_billing_portal(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;

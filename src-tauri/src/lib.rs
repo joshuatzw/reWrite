@@ -264,6 +264,23 @@ pub struct AppState {
     pub is_rewriting: AtomicBool,
     pub auth_session: Mutex<Option<auth::AuthSession>>,
     pub subscription: Mutex<auth::SubscriptionCache>,
+    /// Upgrade requested by a `rewrite://upgrade` deep link, waiting for the
+    /// Settings UI to pick it up. See `UpgradeRequest`.
+    pub pending_upgrade: Mutex<Option<UpgradeRequest>>,
+}
+
+/// An "Upgrade to Pro/Max" click on the marketing site's pricing page, handed
+/// to the app over `rewrite://upgrade?plan=…`.
+#[derive(Clone, serde::Serialize)]
+pub struct UpgradeRequest {
+    /// `"pro"`, `"max"`, or `None` for "show the plan chooser".
+    ///
+    /// A **UI hint only.** Deep links are untrusted input — any app or web page
+    /// on the machine can fire `rewrite://upgrade?plan=whatever` — so this
+    /// never touches entitlements, pricing, or account state. It only decides
+    /// which plan the upgrade dialog opens with; the real plan comes back from
+    /// the server after payment (see `auth::sync_subscription`).
+    pub plan: Option<String>,
 }
 
 // ── Window helpers ────────────────────────────────────────────────────────────
@@ -671,6 +688,64 @@ fn place_menu(ax: f64, ay: f64, w: f64, h: f64, work: (f64, f64, f64, f64)) -> (
     let max_x = (right - w).max(left);
     let max_y = (bottom - h).max(top);
     (x.clamp(left, max_x), y.clamp(top, max_y))
+}
+
+#[cfg(test)]
+mod upgrade_plan_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_two_real_plans() {
+        assert_eq!(
+            parse_upgrade_plan("rewrite://upgrade?plan=pro"),
+            Some("pro".into())
+        );
+        assert_eq!(
+            parse_upgrade_plan("rewrite://upgrade?plan=max"),
+            Some("max".into())
+        );
+        // Case and stray whitespace are the website's problem, not the user's.
+        assert_eq!(
+            parse_upgrade_plan("rewrite://upgrade?plan=PRO"),
+            Some("pro".into())
+        );
+    }
+
+    #[test]
+    fn finds_plan_among_other_params() {
+        assert_eq!(
+            parse_upgrade_plan("rewrite://upgrade?ref=pricing&plan=max&utm=x"),
+            Some("max".into())
+        );
+    }
+
+    #[test]
+    fn fragment_does_not_leak_into_the_value() {
+        // The plan is still `pro`, not `pro#frag` — otherwise a trailing
+        // fragment would silently knock a valid plan out of the allowlist.
+        assert_eq!(
+            parse_upgrade_plan("rewrite://upgrade?plan=pro#frag"),
+            Some("pro".into())
+        );
+    }
+
+    #[test]
+    fn anything_unrecognised_means_show_the_chooser() {
+        // Not errors — every one of these should land the user on the plan
+        // chooser. Deep links are untrusted, so unknown values are ignored
+        // rather than passed through to checkout.
+        for url in [
+            "rewrite://upgrade",
+            "rewrite://upgrade?",
+            "rewrite://upgrade?plan=",
+            "rewrite://upgrade?plan=enterprise",
+            "rewrite://upgrade?plan=pro'; DROP TABLE",
+            "rewrite://upgrade?planning=pro",
+            "rewrite://upgrade?other=max",
+        ] {
+            assert_eq!(parse_upgrade_plan(url), None, "url: {url}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1228,7 +1303,60 @@ pub fn show_settings(app: &AppHandle) {
 
 // ── Deep-link handler ─────────────────────────────────────────────────────────
 
+/// Extracts the requested plan from a `rewrite://upgrade?plan=…` URL.
+///
+/// A strict allowlist rather than a parse, because the input is untrusted: only
+/// exactly `pro` or `max` survive, and everything else — an unknown value, a
+/// malformed query, a missing `plan` — comes back as `None`, which the UI reads
+/// as "show the plan chooser" rather than as an error.
+fn parse_upgrade_plan(url: &str) -> Option<String> {
+    // Strip any fragment first so `?plan=pro#x` doesn't leak the `#x` into the
+    // value, then take everything after the first `?`.
+    let query = url.split('#').next()?.split_once('?')?.1;
+
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() != Some("plan") {
+            continue;
+        }
+        let value = kv.next().unwrap_or("").trim().to_ascii_lowercase();
+        return match value.as_str() {
+            "pro" => Some("pro".to_string()),
+            "max" => Some("max".to_string()),
+            _ => None,
+        };
+    }
+    None
+}
+
 fn handle_deep_link(app: &AppHandle, url: &str) {
+    // "Upgrade to Pro/Max" on the marketing site's pricing page. The site fires
+    // this blind (it can't detect whether the app is installed), so reaching us
+    // means a user with reWrite already installed just asked to pay — bring
+    // Settings forward and hand the plan to the UI.
+    if url.starts_with("rewrite://upgrade") {
+        let plan = parse_upgrade_plan(url);
+
+        if let Some(state) = app.try_state::<AppState>() {
+            // Stashed rather than only emitted: on a cold start this runs from
+            // `setup`, long before the Settings webview has mounted its
+            // listeners, and an event emitted at that point is simply dropped.
+            // Parking it here is what lets the intent survive startup — the UI
+            // drains the slot on mount.
+            *state.pending_upgrade.lock().unwrap() = Some(UpgradeRequest { plan });
+        }
+
+        // Focuses the (pre-warmed) Settings window. The click came from a
+        // browser, so without this the app stays behind it and the upgrade
+        // looks like it did nothing.
+        show_settings(app);
+
+        // The already-running case, where the UI mounted long ago and is
+        // listening. Cold start ignores this and picks the slot up on mount.
+        let _ = app.emit("upgrade:requested", ());
+        return;
+    }
+
     if url.starts_with("rewrite://checkout-success") {
         show_settings(app);
 
@@ -1693,6 +1821,7 @@ pub fn run() {
             is_rewriting: AtomicBool::new(false),
             auth_session: Mutex::new(None),
             subscription: Mutex::new(auth::SubscriptionCache::default()),
+            pending_upgrade: Mutex::new(None),
         })
         .setup(|app| {
             // ── Load config, skills, history ──────────────────────────────────
@@ -2219,6 +2348,7 @@ pub fn run() {
             commands::open_google_login,
             commands::logout,
             commands::open_checkout,
+            commands::take_pending_upgrade,
             commands::open_billing_portal,
             commands::refresh_subscription,
             commands::set_display_name,
