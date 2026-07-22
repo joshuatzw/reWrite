@@ -234,11 +234,51 @@ pub fn save_config(
             crate::selection_watcher::start(&app);
         } else {
             crate::selection_watcher::stop();
+            // Turning the feature off must also take down whatever is on
+            // screen right now. Stopping the watcher only stops *future*
+            // detections; a bubble already showing would otherwise sit there
+            // with nothing left running to ever clear it.
+            crate::hide_bubble(&app);
         }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = bubble_enabled_changed;
 
+    Ok(())
+}
+
+/// Ends the first-run onboarding story, whether it was watched to the end or
+/// skipped — both are a deliberate "I'm done here", so both retire it for good.
+///
+/// Persisting before touching any window means a crash between the two still
+/// leaves the flag set, and the config write is skipped entirely when the flag
+/// is already true (a double-invoke, or a story replayed from a stale window).
+#[tauri::command]
+pub fn finish_onboarding(state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let mut config = lock(&state.config)?.clone();
+    if !config.onboarding_completed {
+        config.onboarding_completed = true;
+        let path = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())?
+            .join("config.toml");
+        crate::config::save(&config, &path).map_err(|e| e.to_string())?;
+        *lock(&state.config)? = config;
+    }
+
+    // Every window operation has to run on the main event-loop thread — same
+    // marshalling `open_settings` / `close_overlay` do. Handing off to Settings
+    // rather than just closing means a user who has just been shown what
+    // reWrite does lands on their account and hotkeys instead of an empty
+    // desktop.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("onboarding") {
+            let _ = w.hide();
+        }
+        crate::show_settings(&handle);
+    });
     Ok(())
 }
 
@@ -274,8 +314,17 @@ pub fn close_overlay(app: AppHandle) {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tauri::command]
 pub fn bubble_clicked(state: State<AppState>, app: AppHandle) -> Result<(), String> {
-    let anchor = crate::selection_watcher::last_anchor()
-        .ok_or_else(|| "No active selection.".to_string())?;
+    // No anchor means the bubble is stale — visible with no live selection
+    // behind it. Dismiss it instead of failing silently: Bubble.tsx swallows
+    // errors from this command (`.catch(() => {})`), so returning one leaves
+    // the user clicking a dead dot with nothing happening, which is precisely
+    // how a stranded bubble used to feel. A click on a bubble that can't do its
+    // job should at least make it go away.
+    let Some(anchor) = crate::selection_watcher::last_anchor() else {
+        crate::trace("bubble_clicked: no active selection, dismissing stale bubble");
+        crate::hide_bubble(&app);
+        return Ok(());
+    };
     crate::trace(&format!(
         "bubble_clicked: enter, {} chars at ({}, {})",
         anchor.text.len(),

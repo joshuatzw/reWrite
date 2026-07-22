@@ -27,6 +27,17 @@ fn default_default_skill_id() -> String {
 fn default_bubble_enabled() -> bool {
     true
 }
+/// Whether the first-run onboarding story has been seen and dismissed.
+///
+/// Defaults to `true` on purpose — the opposite of what a "has the user done
+/// this yet?" flag usually wants. Every config.toml written before this field
+/// existed belongs to someone already using reWrite, and deserializing those
+/// files must not replay an introduction they don't need. A genuine first run
+/// has no config.toml at all, which `lib.rs` detects and answers by explicitly
+/// setting this to `false` before writing the initial file.
+fn default_onboarding_completed() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -46,6 +57,8 @@ pub struct Config {
     pub default_skill_id: String,
     #[serde(default = "default_bubble_enabled")]
     pub bubble_enabled: bool,
+    #[serde(default = "default_onboarding_completed")]
+    pub onboarding_completed: bool,
 }
 
 impl Default for Config {
@@ -59,6 +72,7 @@ impl Default for Config {
             paste_delay_ms: default_paste_delay_ms(),
             default_skill_id: default_default_skill_id(),
             bubble_enabled: default_bubble_enabled(),
+            onboarding_completed: default_onboarding_completed(),
         }
     }
 }

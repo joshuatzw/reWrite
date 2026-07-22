@@ -105,6 +105,35 @@ pub fn is_main_thread() -> bool {
 /// opens after launch" symptom. Both warm-pass hides check this first and skip
 /// once a real open has happened. See `show_overlay` and the warm block.
 static OVERLAY_OPENED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the selection bubble is currently on screen for a *real* reason —
+/// i.e. `show_bubble` was called for a detected selection, as opposed to the
+/// window merely existing (it exists, warm, for the app's whole lifetime).
+///
+/// Two jobs:
+/// 1. The startup warm pass shows the bubble window off-screen to force its
+///    first WebView2 load, then hides it again (once from the window's
+///    `on_page_load` callback, once from a 5s fallback — same shape as the
+///    overlay warm above). If a genuine selection lands before those fire,
+///    they must NOT hide the bubble out from under the user; both check this
+///    flag first.
+/// 2. The Windows selection watcher's keyboard hook uses it to decide whether
+///    an Esc keypress is worth dispatching a "clear" for — see
+///    `selection_watcher::worker_msg_for_keyboard_event`. Without it, Esc
+///    could never dismiss a bubble that is visible but has no tracked
+///    selection behind it.
+///
+/// Set by `show_bubble`/`hide_bubble` only, so it always mirrors the last
+/// intent expressed by this file — never guessed from window state.
+static BUBBLE_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Read-only accessor for `BUBBLE_VISIBLE` (see its doc comment), exposed for
+/// `selection_watcher`'s hook thread. Follows the same "expose a function, keep
+/// the static private" pattern as `paste_target_pid` above.
+pub fn bubble_is_visible() -> bool {
+    BUBBLE_VISIBLE.load(Ordering::SeqCst)
+}
+
 pub fn trace(where_: &str) {
     let t0 = TRACE_START.get_or_init(std::time::Instant::now);
     eprintln!(
@@ -902,6 +931,10 @@ fn work_area_containing_point(_x: f64, _y: f64) -> Option<(f64, f64, f64, f64)> 
 /// like every other window show/hide/position call in this file — see the
 /// comment on `show_overlay` for why that's not optional.
 pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
+    // Claim the window for a real selection *before* marshaling onto the main
+    // thread, so a startup warm-hide that is already queued behind us still
+    // sees the flag and skips. See `BUBBLE_VISIBLE`.
+    BUBBLE_VISIBLE.store(true, Ordering::SeqCst);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = handle.get_webview_window("bubble") {
@@ -950,13 +983,44 @@ pub fn show_bubble(app: &AppHandle, x: f64, y: f64) {
 }
 
 pub fn hide_bubble(app: &AppHandle) {
+    BUBBLE_VISIBLE.store(false, Ordering::SeqCst);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = handle.get_webview_window("bubble") {
             let _ = w.hide();
-            trace("hide_bubble: hidden");
+            // Belt and braces: also move it back off-screen. `hide()` alone is
+            // enough today, but a window left sitting at a real on-screen
+            // coordinate is one stray `show()` (or one OS-driven re-show, e.g.
+            // Windows relocating windows when the desktop is reconfigured)
+            // away from being visibly stranded there — which is exactly the
+            // bug this pass fixes. Parking costs nothing and makes "hidden"
+            // true in both senses. Mirrors `hide_bubble_menu_inner`, which has
+            // always parked on close.
+            park_window_offscreen(&w);
+            trace("hide_bubble: hidden and parked");
         }
     });
+}
+
+/// Move `window` to the shared off-screen park position.
+///
+/// Deliberately **physical** pixels: `outer_position()` (what
+/// `is_bubble_menu_parked` compares against) is physical on every platform, and
+/// so is `hide_bubble_menu_inner`'s long-standing park call. The window
+/// builder's `.position()`, by contrast, takes *logical* coordinates and
+/// multiplies them by the display's scale factor when the window is created —
+/// on a 125%/150% display that turns the -32000 sentinel into -40000/-48000
+/// physical, past the ±32767 range Windows reliably honours and far outside
+/// `is_bubble_menu_parked`'s ±100 tolerance. A window parked that way can end
+/// up clamped or relocated back onto a real monitor while every "is it parked?"
+/// check still believes it is safely off-screen. Both pre-warmed windows are
+/// therefore parked through this helper *after* build instead of via the
+/// builder.
+fn park_window_offscreen(window: &WebviewWindow) {
+    let _ = window.set_position(PhysicalPosition::new(
+        BUBBLE_MENU_PARKED_X,
+        BUBBLE_MENU_PARKED_Y,
+    ));
 }
 
 fn now_ms() -> u64 {
@@ -1297,6 +1361,22 @@ pub fn show_settings(app: &AppHandle) {
             .resizable(true)
             .build()
     {
+        let _ = w.set_focus();
+    }
+}
+
+/// Reveals the first-run onboarding story (`Onboarding.tsx`).
+///
+/// Like every other window here it is pre-warmed hidden at startup, so this is
+/// only a show + focus; there is deliberately no build-on-demand fallback,
+/// because the one caller is `setup()` itself, where the pre-warm has just run.
+/// The re-`center()` matters on reuse — a user who moved the window and then
+/// quit mid-deck should still find it centred when it is offered again.
+pub fn show_onboarding(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("onboarding") {
+        let _ = w.center();
+        let _ = w.unminimize();
+        let _ = w.show();
         let _ = w.set_focus();
     }
 }
@@ -1828,16 +1908,28 @@ pub fn run() {
             let config_path = app.path().app_config_dir()?.join("config.toml");
             // Absence of config.toml means this is the very first launch after
             // install, since `save` (triggered by any settings change) always
-            // writes it. Used below to greet the user with the Settings window
-            // so they know reWrite is running.
+            // writes it. Used below to greet the user with the onboarding story
+            // so they know reWrite is running and how to drive it.
             let is_first_run = !config_path.exists();
             let mut loaded_config = config::load(&config_path);
             if is_first_run {
-                // Write the file now so the Settings-on-launch greeting only
-                // ever fires once, even if the user closes Settings without
-                // changing anything.
+                // Only a fresh install earns the onboarding: the field defaults
+                // to `true` precisely so that existing config.toml files, which
+                // predate it, are read as "already onboarded" (see config.rs).
+                loaded_config.onboarding_completed = false;
+                // Write the file now so the on-launch greeting only ever fires
+                // once, even if the user closes it without changing anything.
                 let _ = config::save(&loaded_config, &config_path);
             }
+            // Read the persisted flag rather than `is_first_run` so that an
+            // onboarding abandoned by quitting the app mid-deck (nothing was
+            // written, since only `finish_onboarding` records completion) is
+            // offered again on the next launch.
+            let show_onboarding_on_launch = !loaded_config.onboarding_completed;
+            trace(&format!(
+                "onboarding: first_run={is_first_run} completed={} show={show_onboarding_on_launch}",
+                loaded_config.onboarding_completed
+            ));
             let hotkey = loaded_config.hotkey.clone();
             let super_hotkey = loaded_config.super_hotkey.clone();
             let default_skill_id = loaded_config.default_skill_id.clone();
@@ -2147,20 +2239,13 @@ pub fn run() {
                 BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
                 BUBBLE_VISIBLE_SIZE + BUBBLE_HIT_PADDING * 2.0,
             )
-            // Build the window already shown but parked far off-screen at the
-            // shared park sentinel (see BUBBLE_MENU_PARKED_X/Y and the sibling
-            // bubble_menu builder just below, which warms itself the exact same
-            // way). A window built `.visible(false)` keeps its webview content
-            // cold — the engine defers loading/painting the page until the
-            // window is first shown — so the very first real `show_bubble`
-            // would otherwise be the cold first paint, briefly flashing a
-            // transparent/half-rendered frame before Bubble.tsx draws the ring.
-            // Showing it off-screen at startup forces that first load+paint out
-            // of sight; `show_bubble` then just moves the already-warm window
-            // on-screen, and `hide_bubble` hides it (the webview stays warm
-            // across later hide/show). The next real show re-positions it, so
-            // the off-screen parking stays invisible.
-            .position(BUBBLE_MENU_PARKED_X, BUBBLE_MENU_PARKED_Y)
+            // Created hidden, then parked and shown off-screen by the warm
+            // block below, then hidden again once warm. It is NOT parked via
+            // the builder's `.position()` — that takes logical coordinates and
+            // can land the window somewhere Windows won't honour on a HiDPI
+            // display (see `park_window_offscreen`). Creating it invisible also
+            // means it can never flash at the default window position for a
+            // frame before the park lands.
             .focused(false)
             // Without this, macOS treats a click on this (deliberately
             // unfocused, so it doesn't steal focus from the source app)
@@ -2169,7 +2254,31 @@ pub fn run() {
             // clicking it does nothing. This is Tauri/wry's wrapper around
             // `NSWindow.acceptsFirstMouse`; harmless on non-macOS targets.
             .accept_first_mouse(true)
-            .visible(true)
+            .visible(false)
+            // Hide the window again as soon as its page has finished loading —
+            // the warm pass below is what makes that page load in the first
+            // place. This is a Rust-side signal on purpose, rather than the
+            // `overlay:ready`-style emit Overlay.tsx sends: the bubble webview
+            // has no `core:event` permission (it isn't in
+            // capabilities/default.json), and a window parked off-screen runs
+            // its JS under WebView2's occlusion throttling anyway — traces show
+            // the overlay's own ready event routinely losing the race against
+            // its 5s fallback. Page-load comes straight from the webview host,
+            // so neither limitation applies.
+            .on_page_load(|window, payload| {
+                if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                    return;
+                }
+                // A genuine selection may already have claimed the bubble while
+                // the page was loading; hiding it now would yank it away from
+                // the user mid-interaction. Same guard the fallback below uses.
+                if BUBBLE_VISIBLE.load(Ordering::SeqCst) {
+                    trace("warm: bubble page loaded but bubble already shown -> skip hide");
+                    return;
+                }
+                trace("warm: bubble page loaded -> hide");
+                let _ = window.hide();
+            })
             .build()
             {
                 let bubble_ref = bubble.clone();
@@ -2179,6 +2288,47 @@ pub fn run() {
                         let _ = bubble_ref.hide();
                     }
                 });
+
+                // ── Warm the bubble's webview, then hide it ────────────────
+                // A window that has never been shown keeps its WebView2 content
+                // cold: the engine defers loading and painting the page until
+                // the first show. Without warming, the very first real
+                // `show_bubble` would be that cold first paint, briefly
+                // flashing a transparent/half-rendered frame before Bubble.tsx
+                // draws the ring. So: park it off-screen, show it (forcing the
+                // load out of sight), and hide it again as soon as the page
+                // reports loaded — see the `on_page_load` callback above.
+                //
+                // That final hide is the fix for "a rainbow circle hangs on the
+                // desktop at startup". This window used to be left *shown*
+                // forever, relying purely on its off-screen position to stay
+                // invisible, with nothing on the startup path ever calling
+                // `hide_bubble` (`selection:cleared` only fires after a
+                // selection was detected). Anything that put it back on a real
+                // monitor — a HiDPI-mangled park position, or Windows
+                // relocating out-of-bounds windows when the desktop is
+                // reconfigured at login — therefore stranded it there for the
+                // whole session, unclickable (`bubble_clicked` has no anchor to
+                // act on) until a real selection happened to move it. Making
+                // visibility, not position, the source of truth removes that
+                // whole failure mode. Mirrors the overlay warm block above.
+                park_window_offscreen(&bubble);
+
+                // Safety net for a page that never reports loaded (a blocked or
+                // failed load): the window must not stay visible just because
+                // the callback never came.
+                let warm_fallback = bubble.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if BUBBLE_VISIBLE.load(Ordering::SeqCst) {
+                        trace("warm: bubble 5s fallback but bubble already shown -> skip hide");
+                        return;
+                    }
+                    trace("warm: bubble 5s fallback -> hide");
+                    let _ = warm_fallback.hide();
+                });
+
+                let _ = bubble.show();
             }
 
             // ── Pre-warm bubble menu ───────────────────────────────────────────
@@ -2198,13 +2348,21 @@ pub fn run() {
             .transparent(true)
             .skip_taskbar(true)
             .inner_size(BUBBLE_MENU_WIDTH, BUBBLE_MENU_HEIGHT)
-            .position(BUBBLE_MENU_PARKED_X, BUBBLE_MENU_PARKED_Y)
+            // Parked after build rather than through the builder's logical
+            // `.position()` — see `park_window_offscreen`. This one matters
+            // twice over: unlike the bubble, this window's *entire* open/closed
+            // protocol is positional (`is_bubble_menu_parked` →
+            // `bubble_menu_is_open` → whether the watcher probes at all), so a
+            // park the position check doesn't recognise makes the watcher treat
+            // the menu as permanently open and stop detecting selections
+            // altogether, until the first stray click re-parks it via
+            // `maybe_close_bubble_menu_on_outside_click`.
             .focused(false)
             // Same fix as the bubble window above — without this, clicking a
             // skill in this unfocused menu would be swallowed as pure window
             // activation on macOS instead of reaching the click handler.
             .accept_first_mouse(true)
-            .visible(true)
+            .visible(false)
             .build()
             {
                 let app_handle = app.handle().clone();
@@ -2214,6 +2372,17 @@ pub fn run() {
                         hide_bubble_menu(&app_handle);
                     }
                 });
+
+                // Park first, then show — this window stays `shown` for the
+                // app's lifetime by design (it is hidden by *parking*, and
+                // `show_bubble_menu` reloads it once it is back on a real
+                // monitor precisely because reloading a parked window paints
+                // blank — see `show_bubble_menu`). Creating it invisible and
+                // showing it only once parked keeps that behaviour while making
+                // it impossible for the window to flash at the default position
+                // before the park lands.
+                park_window_offscreen(&bubble_menu);
+                let _ = bubble_menu.show();
             }
 
             // ── Selection watcher listeners ────────────────────────────────────
@@ -2270,6 +2439,45 @@ pub fn run() {
                 });
             }
 
+            // ── Pre-warm onboarding story ─────────────────────────────────────
+            // 420x747 is the 1080x1920 artwork at 9:16, sized to leave generous
+            // margins on a 1080p display. Undecorated and fixed-size so it reads
+            // as a phone-shaped story card rather than a resizable document
+            // window; its own Skip / Get started buttons (and Esc) are the exits,
+            // and `finish_onboarding` is what actually hides it.
+            match tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "onboarding",
+                tauri::WebviewUrl::App("".into()),
+            )
+            .title("Welcome to reWrite")
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .inner_size(420.0, 747.0)
+            .center()
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .build()
+            {
+                Err(error) => eprintln!("onboarding prewarm failed: {error}"),
+                Ok(onboarding) => {
+                let onboarding_ref = onboarding.clone();
+                onboarding.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Hide rather than destroy, matching every other window
+                        // here. Note this path (Alt+F4) deliberately does NOT
+                        // mark the onboarding complete — only finishing or
+                        // skipping it does, so a window dismissed by accident
+                        // comes back next launch.
+                        api.prevent_close();
+                        let _ = onboarding_ref.hide();
+                    }
+                });
+                }
+            }
+
             // ── Tray ──────────────────────────────────────────────────────────
             let settings_item = MenuItemBuilder::new("Settings").id("settings").build(app)?;
             let quit_item = MenuItemBuilder::new("Quit reWrite").id("quit").build(app)?;
@@ -2302,9 +2510,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── First run: open Settings so the user knows reWrite is running ──
-            if is_first_run {
-                show_settings(app.handle());
+            // ── First run: play the onboarding story ──────────────────────────
+            // It replaces the old "open Settings so the user knows reWrite is
+            // running" greeting rather than joining it — `finish_onboarding`
+            // opens Settings once the deck is done, so the user still ends up
+            // there, just after being told what the app does.
+            if show_onboarding_on_launch {
+                show_onboarding(app.handle());
             }
 
             // ── macOS: Accessibility permission tutorial (roadmap-mac.md Phase 2) ──
@@ -2312,13 +2524,15 @@ pub fn run() {
             // launch so the user lands on the tutorial (`AccessibilityView.tsx`,
             // shown by `Settings.tsx` when `check_accessibility_permission`
             // comes back false) instead of discovering it later via a silently
-            // failing hotkey. `is_first_run` already opened Settings above (and
-            // the frontend will detect the missing permission on mount and
-            // switch straight to the tutorial view), so this only needs to
-            // handle the non-first-run case. Non-macOS builds don't have this
-            // permission concept, so behavior there is unchanged.
+            // failing hotkey. A launch that plays the onboarding already ends in
+            // Settings (via `finish_onboarding`, whose frontend detects the
+            // missing permission on mount and switches straight to the tutorial
+            // view), and the story's own slide 2 covers this ground, so this
+            // only needs to handle launches where no onboarding runs. Non-macOS
+            // builds don't have this permission concept, so behavior there is
+            // unchanged.
             #[cfg(target_os = "macos")]
-            if !is_first_run && !clipboard::accessibility_trusted(false) {
+            if !show_onboarding_on_launch && !clipboard::accessibility_trusted(false) {
                 show_settings(app.handle());
             }
 
@@ -2332,6 +2546,7 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::open_settings,
+            commands::finish_onboarding,
             commands::close_overlay,
             commands::update_hotkey,
             commands::update_super_hotkey,

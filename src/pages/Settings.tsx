@@ -1220,7 +1220,7 @@ export default function Settings() {
   const [active, setActive] = useState<ActiveView>("home");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>({ global_instructions: "", skills: [], builtin_enabled: {}, default_skill_id: "__proofread__" });
-  const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400, bubble_enabled: true });
+  const [config, setConfig] = useState<Config>({ hotkey: "ctrl+shift+r", super_hotkey: "ctrl+shift+period", default_skill_id: "__proofread__", model: "claude-sonnet-4-6", restore_clipboard: true, restore_delay_ms: 500, paste_delay_ms: 400, bubble_enabled: true, onboarding_completed: true });
   const [authState, setAuthState] = useState<AuthState | null>(null);
   // A pending `rewrite://upgrade` click. Held here rather than acted on
   // immediately because the user may not be signed in yet — see the render

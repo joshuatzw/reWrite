@@ -26,6 +26,7 @@ export interface Config {
   restore_delay_ms: number;
   paste_delay_ms: number;
   bubble_enabled: boolean;
+  onboarding_completed: boolean;
 }
 
 export interface HistoryEntry {

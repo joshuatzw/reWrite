@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for all reWrite windows",
-  "windows": ["overlay", "settings", "processing"],
+  "windows": ["overlay", "settings", "processing", "onboarding"],
   "permissions": [
     "core:default",
     "core:window:allow-set-position",
