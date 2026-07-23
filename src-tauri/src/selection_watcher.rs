@@ -47,7 +47,9 @@ mod win {
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
@@ -78,7 +80,14 @@ mod win {
 
     #[derive(Clone, Copy)]
     enum WorkerMsg {
+        /// Something happened that *might* have changed the selection — go ask
+        /// UIA (after the debounce in `worker_loop`).
         Recheck,
+        /// Unconditionally drop the tracked selection and take the bubble down.
+        /// Sent for Esc, which is a direct "dismiss this" from the user, not a
+        /// hint that the selection may have changed — so it skips both the
+        /// debounce and the UIA probe. Mirrors the macOS backend's `Clear`.
+        Clear,
         Shutdown,
     }
 
@@ -227,32 +236,57 @@ mod win {
     /// Catches keyboard-only selection changes that no mouse-up can observe:
     /// Ctrl+A can create a selection when `HAD_SELECTION` is still false, while
     /// Delete/Backspace/typing can clear a known selection with no later mouse
-    /// event. Only Ctrl+A bypasses the `HAD_SELECTION` gate; other keyboard
-    /// traffic stays cheap during normal typing/gaming.
+    /// event. Esc dismisses the bubble outright. Only Ctrl+A and Esc bypass the
+    /// `HAD_SELECTION` gate; other keyboard traffic stays cheap during normal
+    /// typing/gaming.
     unsafe extern "system" fn keyboard_hook_proc(
         code: i32,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if code >= 0 && should_recheck_for_keyboard_event(wparam, lparam) {
-            if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref() {
-                let _ = tx.send(WorkerMsg::Recheck);
+        if code >= 0 {
+            if let Some(msg) = worker_msg_for_keyboard_event(wparam, lparam) {
+                if let Some(tx) = NOTIFY_TX.lock().unwrap().as_ref() {
+                    let _ = tx.send(msg);
+                }
             }
         }
         CallNextHookEx(0, code, wparam, lparam)
     }
 
-    unsafe fn should_recheck_for_keyboard_event(wparam: WPARAM, lparam: LPARAM) -> bool {
+    /// What (if anything) the worker should be told about this key event.
+    /// `None` for the overwhelming majority of keystrokes, which must stay as
+    /// close to free as possible — this runs for every key pressed anywhere on
+    /// the system.
+    unsafe fn worker_msg_for_keyboard_event(wparam: WPARAM, lparam: LPARAM) -> Option<WorkerMsg> {
         if wparam == WM_KEYDOWN as usize || wparam == WM_SYSKEYDOWN as usize {
             let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
             if kb.vkCode == b'A' as u32 && is_ctrl_down_without_alt() {
                 crate::trace("selection_watcher::keyboard_hook_proc: Ctrl+A recheck");
-                return true;
+                return Some(WorkerMsg::Recheck);
+            }
+            // Esc = "make it go away", the reflex every user has for a popup
+            // they didn't ask for. `crate::bubble_is_visible()` is part of the
+            // gate, not just `HAD_SELECTION`, so this also rescues a bubble
+            // that is on screen without a tracked selection behind it — the
+            // one state in which it can do nothing else useful. Both checks
+            // are plain atomic loads; nothing is dispatched for an Esc pressed
+            // while no bubble is up (the common case by far).
+            if kb.vkCode == VK_ESCAPE as u32
+                && (HAD_SELECTION.load(Ordering::Relaxed) || crate::bubble_is_visible())
+            {
+                crate::trace("selection_watcher::keyboard_hook_proc: Esc clear");
+                return Some(WorkerMsg::Clear);
             }
         }
 
-        (wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize)
+        if (wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize)
             && HAD_SELECTION.load(Ordering::Relaxed)
+        {
+            return Some(WorkerMsg::Recheck);
+        }
+
+        None
     }
 
     fn is_ctrl_down_without_alt() -> bool {
@@ -282,8 +316,16 @@ mod win {
         let mut had_selection = false;
 
         'outer: while let Ok(msg) = rx.recv() {
-            if matches!(msg, WorkerMsg::Shutdown) {
-                break;
+            match msg {
+                WorkerMsg::Shutdown => break,
+                // Dismissal is immediate — running it through the debounce
+                // below would leave the bubble on screen for another 200ms
+                // after the user pressed Esc.
+                WorkerMsg::Clear => {
+                    clear_selection(&mut had_selection);
+                    continue;
+                }
+                WorkerMsg::Recheck => {}
             }
 
             // Debounce: collapse a burst of mouse-ups/key-ups (rapid clicking or
@@ -292,6 +334,13 @@ mod win {
             loop {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(WorkerMsg::Recheck) => continue,
+                    // An Esc arriving mid-debounce wins: drop the pending probe
+                    // entirely rather than letting it re-detect and re-show the
+                    // selection the user just dismissed.
+                    Ok(WorkerMsg::Clear) => {
+                        clear_selection(&mut had_selection);
+                        continue 'outer;
+                    }
                     Ok(WorkerMsg::Shutdown) => break 'outer,
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break 'outer,
@@ -302,6 +351,29 @@ mod win {
         }
 
         unsafe { CoUninitialize() };
+    }
+
+    /// Forget the tracked selection and tell the app to take the bubble down.
+    ///
+    /// `had_selection` is the worker's own copy of the flag (see `worker_loop`)
+    /// and is reset alongside the static, so the next probe starts from a clean
+    /// slate rather than believing a selection is still outstanding.
+    ///
+    /// The `selection:cleared` event is emitted unconditionally, not only when
+    /// something was actually tracked: the caller has already established that
+    /// there is a bubble worth dismissing (see the Esc branch in
+    /// `worker_msg_for_keyboard_event`), and the whole point of this path is to
+    /// recover a bubble that is visible *without* a tracked selection. Hiding an
+    /// already-hidden window is a no-op, so an extra emit costs nothing.
+    fn clear_selection(had_selection: &mut bool) {
+        *had_selection = false;
+        HAD_SELECTION.store(false, Ordering::Relaxed);
+        *LAST_ANCHOR.lock().unwrap() = None;
+        LAST_SOURCE_HWND.store(0, Ordering::SeqCst);
+        crate::trace("selection_watcher::clear_selection: emitting selection:cleared");
+        if let Some(app) = APP.get() {
+            let _ = app.emit("selection:cleared", ());
+        }
     }
 
     fn run_probe_cycle(automation: &IUIAutomation, had_selection: &mut bool) {

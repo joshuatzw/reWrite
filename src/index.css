@@ -27,6 +27,14 @@ html, body, #root {
   50%      { transform: scale(1.04); }
 }
 
+/* Onboarding story slides: a soft cross-in on every advance. The slight
+   scale-down settles the frame rather than sliding it, so a full-bleed image
+   never appears to shift off its own edges. */
+@keyframes rw-story-in {
+  from { opacity: 0; transform: scale(1.015); }
+  to   { opacity: 1; transform: scale(1);     }
+}
+
 @keyframes rw-appear {
   from { transform: translateY(20px) scale(0.72); opacity: 0; }
   to   { transform: translateY(0)    scale(1);    opacity: 1; }

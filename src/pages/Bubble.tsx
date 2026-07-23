@@ -10,6 +10,15 @@ import logoBlack from "../assets/logo_transparent.png";
 // isn't instant. `bubble_clicked` now reads the anchor straight from Rust's
 // own last-known state instead, so this click handler needs no payload at all.
 export default function Bubble() {
+  // Note: no `ready`-style emit back to Rust here, deliberately — unlike
+  // Overlay.tsx. Rust hides this window again after warming it (see the "warm
+  // the bubble's webview" block in lib.rs) off the window's own page-load
+  // callback instead. Two reasons: `emit` is a core-plugin call and this window
+  // isn't listed in `src-tauri/capabilities/default.json`, so it would be
+  // silently denied; and even with the permission, the window is parked
+  // off-screen while warming, where WebView2's occlusion throttling delays JS
+  // for seconds. (`invoke` below is an app command, not a plugin one, so it is
+  // unaffected by that capability list.)
   function handleClick() {
     invoke("bubble_clicked").catch(() => {});
   }
