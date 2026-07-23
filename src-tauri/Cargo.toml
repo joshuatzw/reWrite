@@ -1,6 +1,9 @@
 [package]
 name = "rewrite"
+
 version = "1.1.10"
+
+
 description = "reWrite - System-wide AI Text Transformer for Windows"
 authors = ["Josh"]
 edition = "2021"
